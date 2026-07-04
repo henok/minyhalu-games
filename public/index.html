@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hide &amp; Seek 3D</title>
+<style>
+  :root {
+    --purple: #e0805a;   /* terracotta */
+    --pink: #eab54e;     /* honey */
+    --yellow: #ffe1a1;
+    --green: #8aa864;    /* sage */
+    --ink: #6d5a35;      /* warm brown text */
+    --card: rgba(255,250,236,0.96);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body { font-family: 'Comic Sans MS', 'Chalkboard SE', system-ui, sans-serif; background: #fdedc9; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 2;
+    background: radial-gradient(ellipse at center, transparent 68%, rgba(60, 42, 16, 0.13) 100%);
+  }
+
+  .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #lobby { background: linear-gradient(170deg, #ffeec2, #ffd9a0 48%, #b5cc74); overflow-y: auto; }
+  .card {
+    background: var(--card); border-radius: 24px; padding: 24px 28px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.35); max-width: 860px; width: calc(100% - 32px);
+    margin: 20px auto;
+  }
+  h1 { font-size: 2.2rem; color: #8a6430; text-align: center; }
+  h1 .peek { display: inline-block; animation: peek 2s ease-in-out infinite; }
+  @keyframes peek { 0%,100% { transform: rotate(-8deg); } 50% { transform: rotate(8deg); } }
+  .subtitle { text-align: center; color: #a08c62; margin-bottom: 18px; }
+  h2 { color: #7c8b44; font-size: 1.1rem; margin: 14px 0 8px; }
+
+  input[type=text], input[type=password] {
+    font: inherit; font-size: 1.1rem; padding: 10px 14px; border-radius: 14px;
+    border: 3px solid #ead9b0; width: 100%; outline: none; background: #fffdf6; color: var(--ink);
+  }
+  input[type=text]:focus, input[type=password]:focus { border-color: var(--purple); }
+  .row input.grow { width: auto; }
+
+  #paintModal { background: rgba(58, 43, 18, 0.65); z-index: 30; }
+  #paintCanvas {
+    width: 100%; max-width: 300px; border-radius: 12px; cursor: crosshair; touch-action: none;
+    border: 3px solid #ead9b0;
+    background:
+      repeating-conic-gradient(#f2ead6 0 25%, #fffdf6 0 50%) 0 0 / 24px 24px;
+  }
+  .scoreRow {
+    display: flex; justify-content: space-between; gap: 8px; font-size: 0.85rem;
+    color: var(--ink); padding: 4px 10px; background: #f7efdb; border-radius: 8px; margin-bottom: 3px;
+  }
+  .btn {
+    font: inherit; font-size: 1.05rem; font-weight: bold; color: white; border: none;
+    border-radius: 16px; padding: 12px 22px; cursor: pointer; transition: transform 0.1s;
+    box-shadow: 0 4px 0 rgba(0,0,0,0.2);
+  }
+  .btn:hover { transform: scale(1.04); }
+  .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(0,0,0,0.2); }
+  .btn.purple { background: var(--purple); }
+  .btn.pink { background: var(--pink); color: #6b4d15; }
+  .btn.green { background: var(--green); }
+  .btn.big { font-size: 1.3rem; padding: 16px 34px; width: 100%; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 140px; }
+
+  #joinCard { max-width: 460px; }
+  .divider { text-align: center; color: #aaa; margin: 12px 0; font-weight: bold; }
+
+  /* room screen */
+  .columns { display: flex; gap: 22px; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 280px; }
+  #codeBadge {
+    font-size: 2rem; letter-spacing: 0.35em; background: #fff3cd; border: 3px dashed #e0a800;
+    border-radius: 14px; padding: 6px 10px 6px 20px; text-align: center; color: #7a5c00; font-weight: bold;
+  }
+  .roleBtns { display: flex; gap: 10px; }
+  .roleBtn {
+    flex: 1; font: inherit; font-weight: bold; font-size: 1.05rem; padding: 12px;
+    border-radius: 14px; border: 3px solid #ead9b0; background: #fffdf6; cursor: pointer; color: var(--ink);
+  }
+  .roleBtn.active.hider { background: #eef3da; border-color: var(--green); color: #5c7038; }
+  .roleBtn.active.seeker { background: #fde8dc; border-color: var(--purple); color: #b25a35; }
+
+  #playerList { list-style: none; padding: 0; }
+  #playerList li {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px;
+    background: #f7efdb; margin-bottom: 6px; font-weight: bold; color: var(--ink);
+  }
+  #playerList .tag { font-size: 0.75rem; padding: 3px 10px; border-radius: 999px; color: white; }
+  .tag.hider { background: var(--green); } .tag.seeker { background: var(--purple); }
+  .tag.host { background: #dda437; }
+
+  #mapPick { display: flex; gap: 10px; flex-wrap: wrap; }
+  .mapBtn {
+    flex: 1; min-width: 120px; font: inherit; padding: 10px; border-radius: 14px;
+    border: 3px solid #ead9b0; background: #fffdf6; cursor: pointer; text-align: left; color: var(--ink);
+  }
+  .mapBtn.active { border-color: var(--purple); background: #fdeedd; }
+  .mapBtn b { display: block; font-size: 1rem; }
+  .mapBtn span { font-size: 0.72rem; color: #a08c62; }
+
+  #gamesList .gameRow {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 12px;
+    background: #f7efdb; margin-bottom: 6px; font-weight: bold; color: var(--ink); font-size: 0.92rem;
+  }
+  #gamesList .gameRow .grow { flex: 1; }
+  #gamesList .joinMini {
+    font: inherit; font-weight: bold; border: none; border-radius: 10px; padding: 6px 14px;
+    cursor: pointer; background: var(--green); color: white;
+  }
+
+  /* avatar editor */
+  #avatarPreview { width: 100%; height: 200px; border-radius: 16px; background: linear-gradient(#ffeec2, #cfdd9a); display: block; }
+  .sliderRow { display: flex; align-items: center; gap: 10px; margin: 8px 0; font-size: 0.9rem; color: #8c7a52; }
+  .sliderRow input { flex: 1; accent-color: var(--purple); }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 12px; }
+  .swatch {
+    width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(0,0,0,0.15); cursor: pointer;
+  }
+  .swatch.active { border-color: #333; transform: scale(1.15); }
+  #modelSelect {
+    font: inherit; font-size: 1.05rem; padding: 10px 14px; border-radius: 14px;
+    border: 3px solid #ead9b0; width: 100%; outline: none; background: #fffdf6;
+    color: var(--ink); cursor: pointer; margin-bottom: 4px;
+  }
+  #modelSelect:focus { border-color: var(--purple); }
+  .hint { font-size: 0.8rem; color: #999; margin-top: 4px; }
+  .hostOnly[hidden] { display: none; }
+
+  /* HUD */
+  #hud { pointer-events: none; }
+  #hud[hidden] { display: none; }
+  .hudTop {
+    position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 14px; align-items: center;
+  }
+  .pill {
+    background: rgba(84, 66, 34, 0.62); color: #fff8e7; font-weight: bold; padding: 8px 18px;
+    border-radius: 999px; font-size: 1.1rem;
+  }
+  #timer { font-variant-numeric: tabular-nums; min-width: 90px; text-align: center; }
+  #ammoPill { color: var(--yellow); }
+  #crosshair {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    font-size: 26px; color: white; text-shadow: 0 0 4px black; user-select: none;
+  }
+  #palette {
+    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: center; background: rgba(84, 66, 34, 0.58);
+    padding: 10px 14px; border-radius: 18px; pointer-events: auto;
+  }
+  #palette .swatch { width: 30px; height: 30px; }
+  #palette button { pointer-events: auto; }
+  .miniBtn {
+    font: inherit; font-size: 0.85rem; font-weight: bold; border: none; border-radius: 10px;
+    padding: 7px 12px; cursor: pointer; background: var(--yellow); color: #6b4d00;
+  }
+  #poseHint {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+    color: white; text-shadow: 0 1px 3px black; font-size: 0.85rem; opacity: 0.9;
+  }
+  #feed { position: fixed; top: 70px; left: 16px; color: white; text-shadow: 0 1px 3px black; font-size: 0.95rem; }
+  #feed div { margin-bottom: 4px; animation: fadeout 6s forwards; }
+  @keyframes fadeout { 0%,70% { opacity: 1; } 100% { opacity: 0; } }
+
+  #blind { background: #2b2113; flex-direction: column; color: #fff3d8; text-align: center; z-index: 5; }
+  #blind h1 { color: var(--yellow); font-size: 3rem; }
+  #blindCount { font-size: 6rem; font-weight: bold; color: #fff8e7; }
+
+  #banner {
+    position: fixed; top: 20%; left: 50%; transform: translateX(-50%);
+    background: rgba(84, 66, 34, 0.78); color: var(--yellow); font-size: 2rem; font-weight: bold;
+    padding: 18px 36px; border-radius: 20px; text-align: center; z-index: 6;
+  }
+  #end { background: rgba(58, 43, 18, 0.85); flex-direction: column; gap: 20px; z-index: 7; text-align: center; }
+  #endTitle { font-size: 3.2rem; color: var(--yellow); text-shadow: 0 4px 0 rgba(0,0,0,0.4); }
+  #endSub { color: white; font-size: 1.2rem; }
+
+  #clickToPlay {
+    background: rgba(0,0,0,0.45); color: white; font-size: 1.5rem; font-weight: bold;
+    flex-direction: column; gap: 10px; text-align: center; z-index: 4; cursor: pointer;
+  }
+  #clickToPlay small { font-size: 0.95rem; opacity: 0.85; }
+  #toast {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: #e53935; color: white; font-weight: bold; padding: 10px 22px;
+    border-radius: 14px; z-index: 20; display: none;
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="vignette"></div>
+
+<div id="toast"></div>
+
+<div id="lobby" class="overlay">
+  <!-- screen 1: join or create -->
+  <div class="card" id="joinCard">
+    <h1><span class="peek">🙈</span> Hide &amp; Seek 3D</h1>
+    <p class="subtitle">Hide. Sneak. Don't get found!</p>
+    <h2>Your name</h2>
+    <input type="text" id="nameInput" maxlength="16" placeholder="e.g. Turbo Tim">
+    <div class="row" style="margin-top:8px">
+      <input type="password" id="passInput" class="grow" maxlength="64" placeholder="Password (optional)">
+      <button class="btn purple" id="loginBtn">Log in</button>
+    </div>
+    <p class="hint">Optional: log in to keep your scoreboard record and avatar. A new name + password makes an account.</p>
+    <h2 style="margin-top:18px">Start a new game</h2>
+    <button class="btn purple big" id="createBtn">🎮 Create a game</button>
+    <div class="divider">— or join your friends —</div>
+    <div class="row">
+      <input type="text" id="codeInput" class="grow" maxlength="4" placeholder="4-letter code" style="text-transform:uppercase">
+      <button class="btn pink" id="joinBtn">Join!</button>
+    </div>
+    <h2>🔴 Live games</h2>
+    <div id="gamesList"><p class="hint">Looking for games…</p></div>
+    <h2>🏆 Scoreboard</h2>
+    <div class="columns" style="gap:12px">
+      <div class="col"><h2 style="font-size:0.9rem; margin-top:0">🎯 Most finds</h2><div id="scoreFinds"><p class="hint">No scores yet</p></div></div>
+      <div class="col"><h2 style="font-size:0.9rem; margin-top:0">🤫 Longest hidden</h2><div id="scoreHide"><p class="hint">No scores yet</p></div></div>
+    </div>
+  </div>
+
+  <!-- screen 2: room / avatar setup -->
+  <div class="card" id="roomCard" hidden>
+    <div class="row" style="justify-content:space-between; margin-bottom: 10px;">
+      <h1 style="font-size:1.5rem">Get ready!</h1>
+      <div id="codeBadge" title="Share this code with friends">----</div>
+    </div>
+    <div class="columns">
+      <div class="col">
+        <h2>Your name</h2>
+        <input type="text" id="roomNameInput" maxlength="16" placeholder="Type your name">
+        <h2>1. Pick your team</h2>
+        <div class="roleBtns">
+          <button class="roleBtn hider active" id="roleHider">🙈 Hider<br><small>runs faster!</small></button>
+          <button class="roleBtn seeker" id="roleSeeker">🔍 Seeker<br><small>gets the tag-gun!</small></button>
+        </div>
+        <h2>2. Players here</h2>
+        <ul id="playerList"></ul>
+        <div class="hostOnly" id="mapSection">
+          <h2>3. Choose the map</h2>
+          <div id="mapPick"></div>
+        </div>
+        <div style="margin-top:16px">
+          <button class="btn green big hostOnly" id="startBtn">🚀 Start the game!</button>
+          <p class="hint" id="waitHint" hidden>Waiting for the host to start the game…</p>
+        </div>
+      </div>
+      <div class="col">
+        <h2>Make your character</h2>
+        <canvas id="avatarPreview"></canvas>
+        <h2>Character model</h2>
+        <select id="modelSelect"></select>
+        <div class="sliderRow">📏 Short <input type="range" id="heightSlider" min="0.72" max="1.35" step="0.01" value="1"> Tall</div>
+        <div class="sliderRow">🪶 Skinny <input type="range" id="buildSlider" min="0.65" max="1.6" step="0.01" value="1"> Big</div>
+        <div id="classicOnly">
+          <h2>Skin tone</h2>
+          <div class="swatches" id="skinSwatches"></div>
+          <h2>Outfit color</h2>
+          <div class="swatches" id="shirtSwatches"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- in-game HUD -->
+<div id="hud" hidden>
+  <div class="hudTop">
+    <div class="pill" id="phasePill">Hiding time!</div>
+    <div class="pill" id="timer">0:00</div>
+    <div class="pill" id="ammoPill" hidden>🔫 6</div>
+    <div class="pill" id="leftPill">🙈 0 left</div>
+    <div class="pill" id="musicPill" style="pointer-events:auto;cursor:pointer" title="Music on/off (M)">🎵</div>
+  </div>
+  <div id="crosshair" hidden>+</div>
+  <div id="feed"></div>
+  <div id="poseHint" hidden>Right-click: camouflage &amp; disguises! &nbsp;·&nbsp; 1 Stand &nbsp; 2 Crouch &nbsp; 3 Lie flat &nbsp; 4 Ball &nbsp; G Dance &nbsp; C Camo-match</div>
+  <div id="palette" hidden></div>
+</div>
+
+<div id="blind" class="overlay" hidden>
+  <h1>Cover your eyes! 🙈</h1>
+  <p>The hiders are hiding…</p>
+  <div id="blindCount">25</div>
+</div>
+
+<div id="banner" hidden></div>
+
+<div id="end" class="overlay" hidden>
+  <div id="endTitle">🏆</div>
+  <div id="endSub"></div>
+  <button class="btn green big hostOnly" id="againBtn" style="max-width:340px">🔁 Back to lobby</button>
+  <p class="hint" id="endWait" style="color:#ccc" hidden>Waiting for the host…</p>
+</div>
+
+<div id="paintModal" class="overlay" hidden>
+  <div class="card" style="max-width:420px; text-align:center">
+    <h2 style="margin-top:0">🖌️ Body paint studio</h2>
+    <canvas id="paintCanvas" width="256" height="256"></canvas>
+    <div class="swatches" id="brushSwatches" style="justify-content:center"></div>
+    <div class="sliderRow">Thin <input type="range" id="brushSize" min="2" max="32" value="10"> Thick</div>
+    <div class="row" style="justify-content:center">
+      <button class="btn green" id="paintDone">✅ Wear it!</button>
+      <button class="btn pink" id="paintClear">🧽 Clear</button>
+      <button class="btn purple" id="paintCancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="clickToPlay" class="overlay" hidden>
+  <div>🖱️ Click to play!</div>
+  <small>W/↑ run · ←/→ turn · ↓ turn around · A/D sidestep · mouse moves the camera · Space jump · G dance</small>
+</div>
+
+<script type="importmap">
+  { "imports": { "three": "/vendor/three.module.js", "three/addons/": "/vendor/addons/" } }
+</script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

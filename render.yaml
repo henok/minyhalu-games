@@ -1,0 +1,15 @@
+# One-click deploy blueprint for Render.com
+# 1. Push this repo to GitHub
+# 2. On render.com: New + -> Blueprint -> pick the repo -> Apply
+# The server binds process.env.PORT automatically, WebSockets included.
+services:
+  - type: web
+    name: hide-and-seek
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    # NOTE: the free plan has an ephemeral disk — the scoreboard (data/stats.json)
+    # resets on redeploys. Attach a paid persistent disk at /opt/render/project/src/data
+    # if you want scores to survive forever.

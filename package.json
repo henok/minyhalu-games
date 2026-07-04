@@ -1,0 +1,16 @@
+{
+  "name": "hide-and-seek-3d",
+  "version": "1.0.0",
+  "description": "Multiplayer 3D hide and seek game for the browser",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "three": "^0.165.0",
+    "ws": "^8.17.0"
+  }
+}
