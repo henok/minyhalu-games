@@ -20,7 +20,12 @@ When the server starts, it prints something like
 `Friends on your WiFi: http://192.168.1.23:3000` — friends on the same WiFi
 just open that address, type the 4-letter room code, and they're in.
 
-**Friends far away (over the internet):**
+**Publish it on the internet (permanent):**
+Push this repo to GitHub, then on [render.com](https://render.com):
+*New + → Blueprint → pick the repo → Apply* (the included `render.yaml` does the
+rest). You get a permanent `https://….onrender.com` link anyone can play on.
+
+**Friends far away (quick, temporary):**
 Use a free tunnel so friends anywhere can reach your game:
 
 ```bash

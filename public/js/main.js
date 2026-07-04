@@ -746,7 +746,7 @@ let brushColor = '#26160c', brushSize = 10, brushing = false, lastPX = 0, lastPY
   pCanvas.onpointerdown = (e) => {
     brushing = true;
     [lastPX, lastPY] = toXY(e);
-    pCanvas.setPointerCapture(e.pointerId);
+    try { pCanvas.setPointerCapture(e.pointerId); } catch { /* synthetic events have no real pointer */ }
     pCtx.beginPath();
     pCtx.fillStyle = brushColor;
     pCtx.arc(lastPX, lastPY, brushSize / 2, 0, 7);
