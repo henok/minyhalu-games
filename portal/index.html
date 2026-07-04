@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minyhalu Games</title>
+<meta name="description" content="A growing collection of games to play with your friends, right in the browser.">
+<style>
+  :root {
+    --terracotta: #e0805a; --honey: #eab54e; --sage: #8aa864;
+    --ink: #6d5a35; --cream: #fff8ea;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    min-height: 100vh;
+    font-family: 'Comic Sans MS', 'Chalkboard SE', system-ui, sans-serif;
+    background: linear-gradient(170deg, #ffeec2, #ffd9a0 48%, #b5cc74);
+    color: var(--ink);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 16px;
+  }
+  header { text-align: center; margin-bottom: 34px; }
+  h1 { font-size: clamp(2.2rem, 6vw, 3.4rem); color: #8a6430; }
+  h1 .bounce { display: inline-block; animation: bounce 2.2s ease-in-out infinite; }
+  @keyframes bounce { 0%,100% { transform: translateY(0) rotate(-6deg); } 50% { transform: translateY(-10px) rotate(6deg); } }
+  header p { color: #a08c62; font-size: 1.15rem; margin-top: 6px; }
+
+  .games {
+    display: grid; gap: 22px; width: 100%; max-width: 980px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  .card {
+    background: var(--cream); border-radius: 24px; padding: 26px;
+    box-shadow: 0 10px 32px rgba(122, 82, 30, 0.22);
+    display: flex; flex-direction: column; gap: 10px;
+    transition: transform 0.15s;
+  }
+  .card:hover { transform: translateY(-4px) rotate(-0.4deg); }
+  .card .art {
+    font-size: 3.4rem; background: linear-gradient(#bfe3f2, #cfdd9a);
+    border-radius: 16px; padding: 22px 0; text-align: center;
+  }
+  .card h2 { color: #7c8b44; font-size: 1.35rem; }
+  .card p { font-size: 0.95rem; line-height: 1.45; flex: 1; }
+  .card .meta { font-size: 0.8rem; color: #a08c62; }
+  .play {
+    display: block; text-align: center; text-decoration: none;
+    background: var(--sage); color: white; font-weight: bold; font-size: 1.15rem;
+    border-radius: 16px; padding: 13px; box-shadow: 0 4px 0 rgba(0,0,0,0.18);
+    transition: transform 0.1s;
+  }
+  .play:hover { transform: scale(1.03); }
+  .play:active { transform: translateY(3px); box-shadow: 0 1px 0 rgba(0,0,0,0.18); }
+  .card.soon { opacity: 0.75; }
+  .card.soon .play { background: #c9bb98; pointer-events: none; }
+
+  footer { margin-top: 40px; color: #a08c62; font-size: 0.85rem; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="bounce">🎮</span> Minyhalu Games</h1>
+  <p>Games to play with your friends — right in the browser, nothing to install.</p>
+</header>
+
+<main class="games">
+  <!-- To add a game: copy a card, update the link (its subdomain or onrender URL) -->
+  <div class="card">
+    <div class="art">🙈🔍</div>
+    <h2>Hide &amp; Seek 3D</h2>
+    <p>Hide, sneak, paint yourself, disguise as a bush — or grab the tag-gun and go
+       find everyone. Five big summer worlds, live scoreboard, up to a whole
+       crowd of friends with one 4-letter room code.</p>
+    <div class="meta">🕹️ multiplayer · 🌐 works on any laptop</div>
+    <a class="play" href="https://minyhalu-hide-and-seek.onrender.com">▶ Play now</a>
+    <!-- after DNS setup, change to: https://hide-and-seek.minyhalu.com -->
+  </div>
+
+  <div class="card soon">
+    <div class="art">✨</div>
+    <h2>Next game…</h2>
+    <p>Something new is brewing! New games appear here as folders land in the
+       family games workshop.</p>
+    <div class="meta">🚧 coming soon</div>
+    <a class="play" href="#">Soon</a>
+  </div>
+</main>
+
+<footer>Made with ☀️ by the Minyhalu family</footer>
+</body>
+</html>

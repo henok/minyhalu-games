@@ -1,15 +1,37 @@
-# One-click deploy blueprint for Render.com
-# 1. Push this repo to GitHub
-# 2. On render.com: New + -> Blueprint -> pick the repo -> Apply
-# The server binds process.env.PORT automatically, WebSockets included.
+# Minyhalu Games — one blueprint deploys everything.
+#
+# Setup (once): push to GitHub -> render.com -> New + -> Blueprint -> pick repo -> Apply
+# After that: every `git push` auto-deploys, and build filters make sure a push
+# only redeploys the services whose files actually changed.
+#
+# Custom domains (Render dashboard -> each service -> Settings -> Custom Domains):
+#   minyhalu-portal        ->  minyhalu.com  +  www.minyhalu.com
+#   minyhalu-hide-and-seek ->  hide-and-seek.minyhalu.com
+# Each needs one CNAME record at your DNS provider (Render shows the exact value).
+#
+# To add a new game: copy the hide-and-seek service block, change name/rootDir/
+# buildFilter to the new folder, add a card in portal/index.html, push. Done.
+
 services:
+  # ---- the landing page: minyhalu.com ----
   - type: web
-    name: hide-and-seek
+    name: minyhalu-portal
+    runtime: static
+    buildCommand: ""
+    staticPublishPath: portal
+    buildFilter:
+      paths: [portal/**]
+
+  # ---- game: Hide & Seek 3D ----
+  - type: web
+    name: minyhalu-hide-and-seek
     runtime: node
     plan: free
+    rootDir: hide-and-seek
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /
-    # NOTE: the free plan has an ephemeral disk — the scoreboard (data/stats.json)
-    # resets on redeploys. Attach a paid persistent disk at /opt/render/project/src/data
-    # if you want scores to survive forever.
+    buildFilter:
+      paths: [hide-and-seek/**]
+    # NOTE: free plan disk is ephemeral — the scoreboard (data/stats.json)
+    # resets on redeploys. Attach a persistent disk to keep scores forever.
