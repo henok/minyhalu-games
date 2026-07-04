@@ -12,12 +12,16 @@ const PORT = process.env.PORT || 3000;
 
 // ---- Game rules (tweak these!) ----
 const RULES = {
-  HIDE_TIME: 30_000,        // seekers cover their eyes for this long
+  HIDE_TIME: 30_000,        // default hiding time (the host can change it per room)
   SEEK_TIME: 240_000,       // how long seekers get to find everyone
-  SHOTS_PER_HIDER: 2,       // each seeker gets: hiders * this + EXTRA_SHOTS
-  EXTRA_SHOTS: 2,
+  SHOTS_PER_HIDER: 3,       // each seeker gets: hiders * this + EXTRA_SHOTS
+  EXTRA_SHOTS: 3,
+  AMMO_PICKUP: 3,           // shots gained per ammo box
   MAX_SHOT_RANGE: 80,       // sanity check on hits
 };
+
+// playable radius per map — used to scatter ammo boxes
+const MAP_BOUNDS = { village: 60, jungle: 64, backyard: 44, warehouse: 52, forest: 60 };
 
 // ---------- persistent scoreboard + optional accounts ----------
 const DATA_FILE = path.join(__dirname, 'data', 'stats.json');
@@ -108,8 +112,10 @@ function roomInfo(room) {
     map: room.map,
     phase: room.phase,
     endsAt: room.endsAt,
+    hideTime: room.hideTime,
     players: [...room.players.values()].map(p => ({
       id: p.id, name: p.name, role: p.role, caught: p.caught, ammo: p.ammo, avatar: p.avatar,
+      ready: p.ready, playing: p.playing,
     })),
   };
 }
@@ -123,11 +129,21 @@ function clearTimers(room) {
   room.tick = null;
 }
 
+function liveAmmoBoxes(room) {
+  return (room.ammoBoxes || []).filter(b => !b.taken).map(b => [b.id, b.x, b.z]);
+}
+
 function startGame(room) {
   const hiders = [...room.players.values()].filter(p => p.role === 'hider');
   const seekers = [...room.players.values()].filter(p => p.role === 'seeker');
+  const hostWs = room.players.get(room.hostId) && room.players.get(room.hostId).ws;
   if (hiders.length === 0 || seekers.length === 0) {
-    send(room.players.get(room.hostId).ws, { t: 'error', msg: 'You need at least 1 seeker and 1 hider to start!' });
+    if (hostWs) send(hostWs, { t: 'error', msg: 'You need at least 1 seeker and 1 hider to start!' });
+    return;
+  }
+  const notReady = [...room.players.values()].filter(p => p.id !== room.hostId && !p.ready);
+  if (notReady.length) {
+    if (hostWs) send(hostWs, { t: 'error', msg: 'Waiting for everyone to press Ready!' });
     return;
   }
   const ammo = hiders.length * RULES.SHOTS_PER_HIDER + RULES.EXTRA_SHOTS;
@@ -139,16 +155,28 @@ function startGame(room) {
     p.pose = 'stand';
     p.finds = 0;
     p.caughtAtMs = null;
+    p.playing = true;
+    p.eliminated = false;
+    p.spawnAtMs = null;
+  }
+  // scatter ammo boxes for seekers to top up
+  const bounds = MAP_BOUNDS[room.map] || 50;
+  room.ammoBoxes = [];
+  const n = 4 + hiders.length * 2;
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = bounds * (0.2 + Math.random() * 0.65);
+    room.ammoBoxes.push({ id: i, x: +(Math.cos(a) * r).toFixed(1), z: +(Math.sin(a) * r).toFixed(1), taken: false });
   }
   room.phase = 'hide';
-  room.endsAt = Date.now() + RULES.HIDE_TIME;
+  room.endsAt = Date.now() + room.hideTime;
   syncRoom(room);
-  broadcast(room, { t: 'phase', phase: 'hide', endsAt: room.endsAt });
+  broadcast(room, { t: 'phase', phase: 'hide', endsAt: room.endsAt, ammo: liveAmmoBoxes(room) });
 
   clearTimers(room);
-  room.phaseTimer = setTimeout(() => beginSeek(room), RULES.HIDE_TIME);
+  room.phaseTimer = setTimeout(() => beginSeek(room), room.hideTime);
   room.tick = setInterval(() => {
-    const states = [...room.players.values()].map(p => [p.id, ...p.pos, p.ry, p.pose]);
+    const states = [...room.players.values()].filter(p => p.playing).map(p => [p.id, ...p.pos, p.ry, p.pose]);
     broadcast(room, { t: 'state', players: states });
   }, 50);
 }
@@ -169,14 +197,15 @@ function endGame(room, winner) {
   let best = null;
   const now = Date.now();
   for (const p of room.players.values()) {
+    if (!p.playing) continue; // joined but never jumped in — nothing to record
     const rec = recFor(p);
     rec.stats.games++;
     if (p.role === 'seeker') {
       rec.stats.finds += p.finds;
       if (winner === 'seekers') rec.stats.wins++;
-      if (!best || p.finds > best.finds) best = { name: p.name, finds: p.finds };
+      if (p.finds > 0 && (!best || p.finds > best.finds)) best = { name: p.name, finds: p.finds };
     } else {
-      const start = room.seekStartMs || now;
+      const start = Math.max(room.seekStartMs || now, p.spawnAtMs || 0);
       const hiddenUntil = p.caughtAtMs || now;
       rec.stats.hideSeconds += Math.max(0, (hiddenUntil - start) / 1000);
       if (winner === 'hiders' && !p.caught) rec.stats.wins++;
@@ -186,21 +215,42 @@ function endGame(room, winner) {
   broadcast(room, { t: 'phase', phase: 'over', winner, best });
 }
 
-// the round only ends when every hider is found or the clock runs out
-// (running out of ammo just means waiting and hoping!)
+// the round ends when every hider is found, the clock runs out,
+// or every seeker is out of ammo with no boxes left to pick up
 function checkWin(room) {
   if (room.phase !== 'seek') return;
-  const hiders = [...room.players.values()].filter(p => p.role === 'hider');
+  const hiders = [...room.players.values()].filter(p => p.role === 'hider' && p.playing);
   const seekers = [...room.players.values()].filter(p => p.role === 'seeker');
   if (hiders.length === 0 || hiders.every(p => p.caught)) { endGame(room, 'seekers'); return; }
   if (seekers.length === 0) endGame(room, 'hiders'); // nobody left to seek
+}
+
+function checkElimination(room) {
+  if (room.phase !== 'seek') return;
+  const boxesLeft = (room.ammoBoxes || []).some(b => !b.taken);
+  if (boxesLeft) return; // still ammo on the map — nobody is out yet
+  const seekers = [...room.players.values()].filter(p => p.role === 'seeker');
+  for (const s of seekers) {
+    if (s.ammo <= 0 && !s.eliminated) {
+      s.eliminated = true;
+      broadcast(room, { t: 'eliminated', id: s.id, name: s.name });
+    }
+  }
+  if (seekers.length && seekers.every(s => s.eliminated)) endGame(room, 'hiders');
 }
 
 function backToLobby(room) {
   clearTimers(room);
   room.phase = 'lobby';
   room.winner = null;
-  for (const p of room.players.values()) { p.caught = false; p.ammo = 0; }
+  room.ammoBoxes = [];
+  for (const p of room.players.values()) {
+    p.caught = false;
+    p.ammo = 0;
+    p.ready = false;   // everyone re-readies each round
+    p.playing = true;
+    p.eliminated = false;
+  }
   syncRoom(room);
 }
 
@@ -212,6 +262,7 @@ wss.on('connection', (ws) => {
     accountKey: null,
     guestKey: 'g:' + crypto.randomBytes(5).toString('hex'), // fresh identity per visit unless they log in
     finds: 0, caughtAtMs: null,
+    ready: false, playing: true, eliminated: false, spawnAtMs: null,
   };
 
   ws.on('message', (raw) => {
@@ -225,6 +276,7 @@ wss.on('connection', (ws) => {
         const newRoom = {
           code, hostId: player.id, map: 'village', phase: 'lobby',
           players: new Map(), phaseTimer: null, tick: null, winner: null, endsAt: 0,
+          createdAt: Date.now(), hideTime: RULES.HIDE_TIME, ammoBoxes: [],
         };
         rooms.set(code, newRoom);
         joinRoom(player, newRoom, msg);
@@ -235,13 +287,55 @@ wss.on('connection', (ws) => {
         if (!target) { send(ws, { t: 'error', msg: 'No game found with that code. Check the letters!' }); return; }
         joinRoom(player, target, msg);
         if (target.phase === 'hide' || target.phase === 'seek') {
-          // you can slip into a running round — as a hider
+          // you can slip into a running round as a hider — but you stay
+          // invisible in the setup screen until you press "Jump in!"
           player.role = 'hider';
           player.caught = false;
           player.ammo = 0;
+          player.playing = false;
           syncRoom(target);
-          send(ws, { t: 'phase', phase: target.phase, endsAt: target.endsAt });
+          send(ws, { t: 'phase', phase: target.phase, endsAt: target.endsAt, late: true, ammo: liveAmmoBoxes(target) });
         }
+        break;
+      }
+      case 'spawn': { // late joiner finished setting up and jumps into the round
+        if (!room || player.playing) return;
+        if (room.phase !== 'hide' && room.phase !== 'seek') return;
+        player.playing = true;
+        player.spawnAtMs = Date.now();
+        syncRoom(room);
+        break;
+      }
+      case 'chat': {
+        if (!room) return;
+        const text = String(msg.text || '').trim().slice(0, 200);
+        if (!text) return;
+        broadcast(room, { t: 'chat', id: player.id, name: player.name, text });
+        break;
+      }
+      case 'ready': {
+        if (!room) return;
+        player.ready = !!msg.ready;
+        syncRoom(room);
+        break;
+      }
+      case 'setHideTime': {
+        if (room && player.id === room.hostId && Number.isFinite(msg.secs)) {
+          room.hideTime = Math.min(120, Math.max(10, Math.round(msg.secs))) * 1000;
+          syncRoom(room);
+        }
+        break;
+      }
+      case 'ammo': { // seeker picks up an ammo box
+        if (!room || (room.phase !== 'seek' && room.phase !== 'hide')) return;
+        if (player.role !== 'seeker' || player.caught) return;
+        const box = (room.ammoBoxes || []).find(b => b.id === msg.id && !b.taken);
+        if (!box) return;
+        if (Math.hypot(box.x - player.pos[0], box.z - player.pos[2]) > 4) return;
+        box.taken = true;
+        player.ammo += RULES.AMMO_PICKUP;
+        broadcast(room, { t: 'ammoTaken', id: box.id, by: player.id, byName: player.name, ammo: player.ammo });
+        checkElimination(room);
         break;
       }
       case 'auth': {
@@ -282,9 +376,10 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'list': {
-        // joinable games for the lobby browser
+        // joinable games for the lobby browser — newest first
         const games = [...rooms.values()]
           .filter(r => r.phase === 'lobby' || r.phase === 'over')
+          .sort((a, b) => b.createdAt - a.createdAt)
           .slice(0, 20)
           .map(r => {
             const hostPlayer = r.players.get(r.hostId);
@@ -357,7 +452,7 @@ wss.on('connection', (ws) => {
         let hitId = null;
         if (msg.hit) {
           const target = room.players.get(msg.hit);
-          if (target && target.role === 'hider' && !target.caught) {
+          if (target && target.role === 'hider' && target.playing && !target.caught) {
             const dx = target.pos[0] - player.pos[0];
             const dz = target.pos[2] - player.pos[2];
             if (Math.hypot(dx, dz) <= RULES.MAX_SHOT_RANGE) {
@@ -371,6 +466,7 @@ wss.on('connection', (ws) => {
         broadcast(room, { t: 'shot', by: player.id, from: msg.from, to: msg.to, hit: hitId, ammo: player.ammo });
         if (hitId) broadcast(room, { t: 'caught', id: hitId, by: player.id, byName: player.name });
         checkWin(room);
+        checkElimination(room);
         break;
       }
     }
@@ -391,6 +487,7 @@ wss.on('connection', (ws) => {
     broadcast(room, { t: 'left', id: player.id, name: player.name });
     syncRoom(room);
     checkWin(room);
+    checkElimination(room);
   });
 
   function joinRoom(p, room, msg) {
@@ -398,6 +495,7 @@ wss.on('connection', (ws) => {
     p.name = String(msg.name || 'Player').slice(0, 16) || 'Player';
     p.avatar = sanitizeAvatar(msg.avatar || {});
     p.role = msg.role === 'seeker' ? 'seeker' : 'hider';
+    p.ready = false;
     room.players.set(p.id, p);
     send(p.ws, { t: 'joined', id: p.id, code: room.code });
     syncRoom(room);

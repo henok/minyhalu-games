@@ -21,20 +21,44 @@ function toonGradient() {
 export const toonMat = (color) => new THREE.MeshToonMaterial({ color, gradientMap: toonGradient() });
 export const toonVertexMat = () => new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: toonGradient() });
 
-// simple eyes + smile for the classic kids
-let defaultFaceTex = null;
-function getDefaultFace() {
-  if (defaultFaceTex) return defaultFaceTex;
+// classic-kid faces: calm smile, alert "someone's near!", scared "they're HERE!"
+function drawFace(kind) {
   const c = document.createElement('canvas');
   c.width = c.height = 128;
   const x = c.getContext('2d');
   x.fillStyle = '#26160c';
-  x.beginPath(); x.arc(44, 52, 7, 0, 7); x.fill();
-  x.beginPath(); x.arc(84, 52, 7, 0, 7); x.fill();
-  x.strokeStyle = '#26160c'; x.lineWidth = 5; x.lineCap = 'round';
-  x.beginPath(); x.arc(64, 72, 20, 0.2 * Math.PI, 0.8 * Math.PI); x.stroke();
-  defaultFaceTex = new THREE.CanvasTexture(c);
-  return defaultFaceTex;
+  x.strokeStyle = '#26160c';
+  x.lineCap = 'round';
+  if (kind === 'alert') {
+    x.lineWidth = 5;
+    x.beginPath(); x.arc(44, 50, 10, 0, 7); x.stroke();
+    x.beginPath(); x.arc(84, 50, 10, 0, 7); x.stroke();
+    x.beginPath(); x.arc(44, 50, 4, 0, 7); x.fill();
+    x.beginPath(); x.arc(84, 50, 4, 0, 7); x.fill();
+    x.beginPath(); x.arc(64, 82, 8, 0, 7); x.stroke(); // little "o" mouth
+  } else if (kind === 'scared') {
+    x.lineWidth = 5;
+    x.beginPath(); x.moveTo(32, 32); x.quadraticCurveTo(44, 22, 56, 30); x.stroke(); // eyebrows up
+    x.beginPath(); x.moveTo(72, 30); x.quadraticCurveTo(84, 22, 96, 32); x.stroke();
+    x.fillStyle = '#ffffff';
+    x.beginPath(); x.arc(44, 52, 12, 0, 7); x.fill();  // wide white eyes
+    x.beginPath(); x.arc(84, 52, 12, 0, 7); x.fill();
+    x.fillStyle = '#26160c';
+    x.beginPath(); x.arc(44, 54, 5, 0, 7); x.fill();
+    x.beginPath(); x.arc(84, 54, 5, 0, 7); x.fill();
+    x.beginPath(); x.arc(64, 88, 11, 0, 7); x.fill();  // big open mouth
+  } else { // calm
+    x.beginPath(); x.arc(44, 52, 7, 0, 7); x.fill();
+    x.beginPath(); x.arc(84, 52, 7, 0, 7); x.fill();
+    x.lineWidth = 5;
+    x.beginPath(); x.arc(64, 72, 20, 0.2 * Math.PI, 0.8 * Math.PI); x.stroke();
+  }
+  return new THREE.CanvasTexture(c);
+}
+let FACE_TEX = null;
+function faceTextures() {
+  if (!FACE_TEX) FACE_TEX = { calm: drawFace('calm'), alert: drawFace('alert'), scared: drawFace('scared') };
+  return FACE_TEX;
 }
 
 function darken(hex, amt = 0.5) {
@@ -51,6 +75,7 @@ function makeBodyShell(radius, height) {
   const shell = new THREE.Mesh(geo, mat);
   shell.position.y = height / 2 + 0.04;
   shell.visible = false;
+  shell.userData.noHit = true; // decoration only — bullets must NOT count it as the player
   return shell;
 }
 function applyShellPaint(shell, dataUrl) {
@@ -80,6 +105,7 @@ function makeGhillie(colors, height) {
     leaf.position.set(Math.cos(a) * r, 0.15 + Math.random() * height * 0.85, Math.sin(a) * r);
     leaf.rotation.set(Math.random() * 0.9 - 0.45, Math.random() * Math.PI, Math.random() * 0.9 - 0.45);
     leaf.castShadow = true;
+    leaf.userData.noHit = true; // shots pass through the foliage
     g.add(leaf);
   }
   return g;
@@ -231,7 +257,7 @@ function buildGlbAvatar(cfg, spec) {
     });
   }
 
-  return { group, setPose, setWalk, update, setPaint, setGhillie, setBodyPaint, setGhost, standHeight, headY: standHeight * 0.85 };
+  return { group, setPose, setWalk, update, setPaint, setGhillie, setBodyPaint, setGhost, setExpression: () => {}, standHeight, headY: standHeight * 0.85 };
 }
 
 // ================= Classic procedural kids =================
@@ -406,9 +432,18 @@ function buildClassicAvatar(cfg, gender) {
     }
     faceGeo.computeVertexNormals();
   }
-  const faceMat = new THREE.MeshBasicMaterial({ map: getDefaultFace(), transparent: true });
+  const faceMat = new THREE.MeshBasicMaterial({ map: faceTextures().calm, transparent: true });
   faceMat.userData.alwaysTransparent = true;
   headG.add(new THREE.Mesh(faceGeo, faceMat));
+
+  // the face reacts to how close other players are
+  let expression = 'calm';
+  function setExpression(kind) {
+    if (kind === expression) return;
+    expression = kind;
+    faceMat.map = faceTextures()[kind] || faceTextures().calm;
+    faceMat.needsUpdate = true;
+  }
 
   const standHeight = legLen + headLocalY + headR * 1.4;
 
@@ -532,7 +567,7 @@ function buildClassicAvatar(cfg, gender) {
   shell.castShadow = false; // painted strokes shouldn't cast a solid cylinder shadow
 
   return {
-    group, setPose, setWalk, update: () => {}, setPaint, setGhillie, setBodyPaint, setGhost,
+    group, setPose, setWalk, update: () => {}, setPaint, setGhillie, setBodyPaint, setGhost, setExpression,
     standHeight, headY: legLen + headLocalY,
   };
 }

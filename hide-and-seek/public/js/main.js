@@ -1,6 +1,6 @@
 // Hide & Seek 3D — client
 import * as THREE from 'three';
-import { buildAvatar, makeNameTag } from './avatar.js';
+import { buildAvatar, makeNameTag, toonMat } from './avatar.js';
 import { MODELS, PROPS, makeProp } from './models.js';
 import { MAPS, buildMap } from './maps.js';
 import { Net } from './net.js';
@@ -29,12 +29,15 @@ let roomPlayers = [];            // latest lobby data from server
 const remotes = new Map();       // id -> {avatar, tag, target:{pos,ry}, data}
 let world = null;
 let me = {
-  name: '', role: 'hider', caught: false, ammo: 0, paint: null, ghillie: null, bodyPaint: null, disguise: null, pose: 'stand',
+  name: '', role: 'hider', caught: false, eliminated: false, ammo: 0,
+  paint: null, ghillie: null, bodyPaint: null, disguise: null, pose: 'stand',
   pos: new THREE.Vector3(), vel: new THREE.Vector3(), onGround: true,
   walkT: 0, walkK: 0,
   cfg: { h: 1, w: 1, model: 'classic_boy', skin: SKIN_TONES[1], shirt: SHIRTS[0] },
 };
 let myProp = null; // my disguise mesh, when I'm pretending to be furniture
+let pendingRound = null; // joined a running game: {phase, endsAt, ammo} until "Jump in!"
+let ammoMeshes = []; // pickup boxes currently on the map
 let camoOpen = false; // palette deliberately open: mouse freed, no click-to-play overlay
 let myAvatar = null;
 let heading = 0;               // which way the player faces (arrow keys turn this)
@@ -95,6 +98,7 @@ const sfx = {
   phase: () => { beep(523, 0.12, 'sine'); setTimeout(() => beep(784, 0.2, 'sine'), 130); },
   win: () => [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => beep(f, 0.18, 'sine'), i * 140)),
   paint: () => beep(880, 0.08, 'sine', 0.1),
+  pickup: () => { beep(660, 0.08, 'sine', 0.12); setTimeout(() => beep(880, 0.1, 'sine', 0.12), 70); },
 };
 
 // ---------- relaxing background music (synthesized — no files needed) ----------
@@ -311,15 +315,39 @@ function renderLobby() {
   $('codeBadge').textContent = roomPlayers.length ? $('codeBadge').textContent : '----';
   const list = $('playerList');
   list.innerHTML = '';
+  const inLobby = phase === 'lobby';
   for (const p of roomPlayers) {
     const li = document.createElement('li');
     const roleTag = `<span class="tag ${p.role}">${p.role === 'hider' ? '🙈 hider' : '🔍 seeker'}</span>`;
     const hostTag = p.id === hostId ? '<span class="tag host">👑 host</span>' : '';
-    li.innerHTML = `<span>${p.id === myId ? '⭐' : '🧑'}</span> <span class="grow">${escapeHtml(p.name)}</span> ${roleTag} ${hostTag}`;
+    let readyTag = '';
+    if (inLobby && p.id !== hostId) readyTag = p.ready ? '✅' : '⏳';
+    if (p.playing === false) readyTag = '🛋️ setting up';
+    li.innerHTML = `<span>${p.id === myId ? '⭐' : '🧑'}</span> <span class="grow">${escapeHtml(p.name)}</span> ${readyTag} ${roleTag} ${hostTag}`;
     list.appendChild(li);
   }
   document.querySelectorAll('.hostOnly').forEach(el => (el.hidden = !isHost));
-  $('waitHint').hidden = isHost;
+
+  // host: Start unlocks only with both roles filled and everyone ready
+  const hiders = roomPlayers.filter(p => p.role === 'hider').length;
+  const seekers = roomPlayers.filter(p => p.role === 'seeker').length;
+  const othersReady = roomPlayers.filter(p => p.id !== hostId).every(p => p.ready);
+  if (isHost) {
+    $('startBtn').disabled = !(hiders >= 1 && seekers >= 1 && othersReady);
+    $('startHint').textContent = (!hiders || !seekers)
+      ? 'You need at least 1 hider and 1 seeker to start.'
+      : (othersReady ? '' : 'Waiting for everyone to press Ready…');
+  }
+
+  // guests: ready button (or Jump-in when the round is already running)
+  const mine = roomPlayers.find(p => p.id === myId);
+  const showReady = !isHost && inLobby && !pendingRound;
+  $('readyBtn').hidden = !showReady;
+  if (showReady && mine) {
+    $('readyBtn').textContent = mine.ready ? '🎉 Ready! (tap to change)' : "✅ I'm ready!";
+  }
+  $('jumpBtn').hidden = !pendingRound;
+  $('waitHint').hidden = isHost || !inLobby || !!pendingRound;
   $('endWait').hidden = isHost;
 }
 function escapeHtml(s) {
@@ -414,12 +442,56 @@ net.on('scores', (m) => {
   render($('scoreFinds'), m.finds, e => `${e.v} 🎯`);
   render($('scoreHide'), m.hide, e => `${Math.floor(e.v / 60)}m ${e.v % 60}s`);
 });
+if (innerWidth > 900) $('scoreDetails').open = true; // desktop: scoreboard always visible
+
+// ---------- lobby chat ----------
+function sendChat() {
+  const text = $('chatInput').value.trim();
+  if (!text) return;
+  net.send({ t: 'chat', text });
+  $('chatInput').value = '';
+}
+$('chatSend').onclick = sendChat;
+$('chatInput').onkeydown = (e) => {
+  e.stopPropagation(); // typing shouldn't trigger game keys
+  if (e.key === 'Enter') sendChat();
+};
+net.on('chat', (m) => {
+  const log = $('chatLog');
+  const row = document.createElement('div');
+  const who = document.createElement('b');
+  who.textContent = m.name + ': ';
+  row.append(who, document.createTextNode(m.text));
+  log.appendChild(row);
+  while (log.children.length > 60) log.removeChild(log.firstChild);
+  log.scrollTop = log.scrollHeight;
+});
+
+$('readyBtn').onclick = () => {
+  const mine = roomPlayers.find(p => p.id === myId);
+  net.send({ t: 'ready', ready: !(mine && mine.ready) });
+};
+$('hideTimeSel').onchange = (e) => { if (isHost) net.send({ t: 'setHideTime', secs: +e.target.value }); };
+
+$('jumpBtn').onclick = () => {
+  if (!pendingRound) return;
+  const p = pendingRound;
+  pendingRound = null;
+  net.send({ t: 'spawn' });
+  startRound(p.endsAt, p.ammo || []);
+  if (p.phase === 'seek') {
+    phase = 'seek';
+    $('blind').hidden = true;
+    $('phasePill').textContent = "Don't get found! 🤫";
+  }
+};
 
 net.on('room', (m) => {
   hostId = m.hostId;
   isHost = myId === m.hostId;
   roomPlayers = m.players;
   showMap(m.map);
+  if (m.hideTime) $('hideTimeSel').value = String(Math.round(m.hideTime / 1000));
   const mine = m.players.find(p => p.id === myId);
   if (mine) {
     me.ammo = mine.ammo;
@@ -438,9 +510,22 @@ net.on('room', (m) => {
 net.on('error', (m) => toast(m.msg));
 
 net.on('phase', (m) => {
-  if (m.phase === 'hide') startRound(m.endsAt);
+  if (m.late) {
+    // we joined a game that's already running — finish setup first, then jump in
+    pendingRound = { phase: m.phase, endsAt: m.endsAt, ammo: m.ammo || [] };
+    renderLobby();
+    toast('Game in progress — set up your character, then jump in!');
+    return;
+  }
+  if (pendingRound && (m.phase === 'hide' || m.phase === 'seek')) {
+    // still in the setup screen — just remember where the round is up to
+    pendingRound.phase = m.phase;
+    pendingRound.endsAt = m.endsAt;
+    return;
+  }
+  if (m.phase === 'hide') startRound(m.endsAt, m.ammo || []);
   else if (m.phase === 'seek') {
-    if (!world || !myAvatar) startRound(m.endsAt); // joined mid-round — build the world first
+    if (!world || !myAvatar) startRound(m.endsAt, m.ammo || []);
     phase = 'seek'; endsAt = m.endsAt;
     $('blind').hidden = true;
     $('phasePill').textContent = me.role === 'seeker' ? 'Go find them! 🔍' : "Don't get found! 🤫";
@@ -452,8 +537,10 @@ net.on('phase', (m) => {
       askPointerLock();   // eyes open — let the seeker grab the mouse and go!
     }
   } else if (m.phase === 'over') {
+    if (pendingRound) { pendingRound = null; renderLobby(); return; } // never jumped in
     phase = 'over'; endsAt = 0;
     document.exitPointerLock?.();
+    revealEveryone(); // names + beacons over every hiding spot
     const iWon = (m.winner === 'seekers') === (me.role === 'seeker');
     $('endTitle').textContent = m.winner === 'seekers' ? '🔍 SEEKERS WIN! 🏆' : '🙈 HIDERS WIN! 🏆';
     const bestLine = m.best ? ` — 🏆 Best seeker: ${m.best.name} (${m.best.finds} ${m.best.finds === 1 ? 'find' : 'finds'})` : '';
@@ -463,6 +550,31 @@ net.on('phase', (m) => {
     sfx.win();
   }
 });
+
+// game over: everyone steps out of hiding — tags and beacons on every spot
+function revealEveryone() {
+  if (!world) return;
+  const beam = (pos, color) => {
+    const m = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.16, 0.16, 30, 8, 1, true),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, toneMapped: false, depthWrite: false })
+    );
+    m.position.set(pos.x, 15, pos.z);
+    scene.add(m);
+  };
+  for (const r of remotes.values()) {
+    if (r.prop) { scene.remove(r.prop); r.prop = null; } // unmask disguises
+    r.avatar.group.visible = true;
+    if (!r.tag) {
+      r.tag = makeNameTag(r.data.name, r.data.role === 'seeker' ? '#ffd9c4' : '#c9f2b3');
+      r.tag.position.y = r.avatar.standHeight + 0.35;
+      r.avatar.group.add(r.tag);
+    }
+    r.tag.material.depthTest = false; // show through walls — it's reveal time
+    beam(r.avatar.group.position, r.data.role === 'seeker' ? '#e0805a' : '#8aa864');
+  }
+  if (myAvatar) beam(me.pos, me.role === 'seeker' ? '#e0805a' : '#8aa864');
+}
 
 net.on('state', (m) => {
   for (const [id, x, y, z, ry, pose] of m.players) {
@@ -540,10 +652,11 @@ net.on('_closed', () => {
 });
 
 // ---------- entering / leaving a round ----------
-function startRound(ends) {
+function startRound(ends, ammoList = []) {
   phase = 'hide';
   endsAt = ends;
   me.caught = false;
+  me.eliminated = false;
   me.paint = null;
   me.ghillie = null;
   me.bodyPaint = null;
@@ -553,6 +666,7 @@ function startRound(ends) {
   remoteCaught.clear(); // fresh round, nobody is caught yet
   scene = new THREE.Scene();
   world = buildMap(currentMap, scene);
+  spawnAmmoBoxes(ammoList);
 
   // my avatar + spawn
   myAvatar = buildAvatar(me.cfg);
@@ -597,6 +711,7 @@ function startRound(ends) {
 function syncRemotePlayers() {
   if (phase === 'lobby' || phase === 'joining') return;
   for (const p of roomPlayers) {
+    if (p.playing === false) continue; // still in the setup screen — invisible until they jump in
     if (p.id === myId || remotes.has(p.id)) {
       // keep caught state in sync
       if (p.id !== myId && remotes.has(p.id)) remotes.get(p.id).data = p;
@@ -630,12 +745,58 @@ function backToLobbyUI() {
 }
 
 function updateLeftPill() {
-  const hiders = roomPlayers.filter(p => p.role === 'hider');
+  const hiders = roomPlayers.filter(p => p.role === 'hider' && p.playing !== false);
   const free = hiders.filter(p => !(p.id === myId ? me.caught : (remotes.get(p.id)?.data.caught || remoteCaught.has(p.id)))).length;
   $('leftPill').textContent = `🙈 ${free} hiding`;
 }
 const remoteCaught = new Set(); // updated via caught events
-net.on('caught2', () => {}); // placeholder
+
+// ---------- ammo pickups ----------
+function spawnAmmoBoxes(list) {
+  ammoMeshes = [];
+  for (const [id, x, z] of list) {
+    const g = new THREE.Group();
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.42, 0.5), toonMat('#c99a63'));
+    g.add(box);
+    const band = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.1, 0.54), toonMat('#5a4632'));
+    g.add(band);
+    const glow = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.08, 0.08, 0.26, 8),
+      new THREE.MeshBasicMaterial({ color: '#ffe1a1', toneMapped: false })
+    );
+    glow.position.y = 0.36;
+    g.add(glow);
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    g.position.set(x, 0.5, z);
+    scene.add(g);
+    ammoMeshes.push({ id, g, x, z, requested: false });
+  }
+}
+
+net.on('ammoTaken', (m) => {
+  const i = ammoMeshes.findIndex(b => b.id === m.id);
+  if (i >= 0) { scene.remove(ammoMeshes[i].g); ammoMeshes.splice(i, 1); }
+  if (m.by === myId) {
+    me.ammo = m.ammo;
+    $('ammoPill').textContent = `🔫 ${me.ammo}`;
+    sfx.pickup();
+    feed('🔫 +3 shots!');
+  } else {
+    feed(`${m.byName} grabbed an ammo box!`);
+  }
+});
+
+net.on('eliminated', (m) => {
+  if (m.id === myId) {
+    me.eliminated = true;
+    myAvatar?.setGhost(true);
+    showBanner('Out of shots — eliminated! 👻 You can still watch.');
+    sfx.caught();
+  } else {
+    remotes.get(m.id)?.avatar.setGhost(true);
+    feed(`💨 ${m.name} ran out of shots!`);
+  }
+});
 
 // ---------- paint tools ----------
 function buildPalette() {
@@ -877,7 +1038,9 @@ function shoot() {
   for (const [id, r] of remotes) {
     if (r.data.role !== 'hider' || r.data.caught || remoteCaught.has(id)) continue;
     const src = r.prop || r.avatar.group; // disguised hiders are shot via their prop
-    src.traverse(o => { if (o.isMesh) { candidates.push(o); owners.set(o, id); } });
+    // skip invisible meshes and decoration (paint shells, ghillie leaves) —
+    // only the actual body counts as a hit
+    src.traverse(o => { if (o.isMesh && o.visible && !o.userData.noHit) { candidates.push(o); owners.set(o, id); } });
   }
   const wallHits = raycaster.intersectObjects(world.solids, false);
   const playerHits = raycaster.intersectObjects(candidates, false);
@@ -1017,6 +1180,16 @@ function updateLocal(dt) {
     myProp.rotation.z = moved > 0.4 ? Math.sin(performance.now() / 90) * 0.09 : 0;
   }
 
+  // seekers: walk over an ammo box to grab it
+  if (me.role === 'seeker' && !me.caught && phase === 'seek') {
+    for (const b of ammoMeshes) {
+      if (!b.requested && Math.hypot(b.x - me.pos.x, b.z - me.pos.z) < 1.5) {
+        b.requested = true;
+        net.send({ t: 'ammo', id: b.id });
+      }
+    }
+  }
+
   // --- third-person camera: springy follow, shoulder offset, wind sway ---
   const t = performance.now() / 1000;
   if ((keys.KeyW || keys.ArrowUp) && !frozen) {
@@ -1083,6 +1256,25 @@ function updateRemotes(dt) {
 const oldCaught = net.handlers['caught'];
 net.on('caught', (m) => { remoteCaught.add(m.id); oldCaught(m); });
 
+// ---------- proximity expressions: faces get worried when someone's close ----------
+setInterval(() => {
+  if ((phase !== 'hide' && phase !== 'seek') || !myAvatar) return;
+  const exprFor = (d) => (d < 4 ? 'scared' : d < 9 ? 'alert' : 'calm');
+  const nearestTo = (pos, excludeId) => {
+    let d = Infinity;
+    for (const [id, r] of remotes) {
+      if (id === excludeId) continue;
+      d = Math.min(d, pos.distanceTo(r.avatar.group.position));
+    }
+    return d;
+  };
+  myAvatar.setExpression(exprFor(nearestTo(me.pos, null)));
+  for (const [id, r] of remotes) {
+    const d = Math.min(r.avatar.group.position.distanceTo(me.pos), nearestTo(r.avatar.group.position, id));
+    r.avatar.setExpression(exprFor(d));
+  }
+}, 200);
+
 // ---------- HUD tick ----------
 setInterval(() => {
   if (phase !== 'hide' && phase !== 'seek') return;
@@ -1104,6 +1296,10 @@ function tick(dt) {
     updateLocal(dt);
     updateRemotes(dt);
     world.animate(performance.now() / 1000, dt);  // grass sways, clouds drift, butterflies flap
+    for (const b of ammoMeshes) { // ammo boxes bob and spin so they catch the eye
+      b.g.position.y = 0.5 + Math.sin(performance.now() / 400 + b.id) * 0.12;
+      b.g.rotation.y += dt * 1.5;
+    }
     sendPos();
     const now = performance.now();
     for (let i = tracers.length - 1; i >= 0; i--) {
