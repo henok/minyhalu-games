@@ -39,6 +39,15 @@ function gradMesh(geo, bottom, top, opts = {}) {
   return mesh;
 }
 
+// seeded RNG: every player in a room generates the IDENTICAL map (scattered
+// trees, palm leans, tufts...) — which also lets the server's robot players
+// use the host's collision data safely
+let rng = Math.random;
+function seededRandom(seed) {
+  let s = (seed >>> 0) || 7;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+}
+
 class Builder {
   constructor(scene, bounds) {
     this.scene = scene;
@@ -119,7 +128,7 @@ class Builder {
 
   // --- vegetation ---
   tree(x, z, s = 1, lo = '#79a04f', hi = '#d7e478') {
-    const tilt = (Math.random() - 0.5) * 0.12;
+    const tilt = (rng() - 0.5) * 0.12;
     this.cylinder(x, z, 0.22 * s, 2.3 * s, '#8a6642', { r2: 0.34 * s, tilt, collide: false });
     this.colliders.push({ minX: x - 0.4 * s, maxX: x + 0.4 * s, minZ: z - 0.4 * s, maxZ: z + 0.4 * s, top: 99 });
     const blobs = [
@@ -137,7 +146,7 @@ class Builder {
   }
   palm(x, z, s = 1) {
     const g = new THREE.Group();
-    const lean = (Math.random() - 0.5) * 0.55;
+    const lean = (rng() - 0.5) * 0.55;
     const trunkMat = toonMat('#b3946a');
     let px = 0, py = 0;
     for (let i = 0; i < 5; i++) {
@@ -192,11 +201,11 @@ class Builder {
   }
   tuft(x, z, s = 1, lo = '#87a552', hi = '#d6cf7c') {
     const g = new THREE.Group();
-    const n = 3 + Math.floor(Math.random() * 3);
+    const n = 3 + Math.floor(rng() * 3);
     for (let i = 0; i < n; i++) {
-      const blade = gradMesh(new THREE.ConeGeometry(0.09 * s, (0.55 + Math.random() * 0.5) * s, 5), lo, hi);
-      blade.position.set((Math.random() - 0.5) * 0.5 * s, blade.geometry.parameters.height / 2, (Math.random() - 0.5) * 0.5 * s);
-      blade.rotation.z = (Math.random() - 0.5) * 0.25;
+      const blade = gradMesh(new THREE.ConeGeometry(0.09 * s, (0.55 + rng() * 0.5) * s, 5), lo, hi);
+      blade.position.set((rng() - 0.5) * 0.5 * s, blade.geometry.parameters.height / 2, (rng() - 0.5) * 0.5 * s);
+      blade.rotation.z = (rng() - 0.5) * 0.25;
       blade.castShadow = false;
       g.add(blade);
     }
@@ -435,7 +444,7 @@ class Builder {
     }
     g.position.set(x, y, z);
     this.scene.add(g);
-    this.animated.push({ kind: 'drift', obj: g, speed: 0.25 + Math.random() * 0.35, limit: this.bounds * 4 });
+    this.animated.push({ kind: 'drift', obj: g, speed: 0.25 + rng() * 0.35, limit: this.bounds * 4 });
   }
   butterfly(cx, cz, color = '#f2b6c9') {
     const g = new THREE.Group();
@@ -450,7 +459,7 @@ class Builder {
     this.scene.add(g);
     this.animated.push({
       kind: 'butterfly', obj: g, wingR, wingL,
-      cx, cz, r: 2.5 + Math.random() * 3, sp: 0.25 + Math.random() * 0.3, phase: Math.random() * 9,
+      cx, cz, r: 2.5 + rng() * 3, sp: 0.25 + rng() * 0.3, phase: rng() * 9,
     });
   }
   fence(height, color) {
@@ -462,8 +471,8 @@ class Builder {
   }
   sprinkle(count, fn, exclude = 6) {
     for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const r = exclude + Math.random() * (this.bounds - exclude - 2);
+      const a = rng() * Math.PI * 2;
+      const r = exclude + rng() * (this.bounds - exclude - 2);
       fn(Math.cos(a) * r, Math.sin(a) * r);
     }
   }
@@ -517,7 +526,8 @@ const HOUSE_STYLES = [
   { wall: '#d3c3de', roof: '#7f8fb3', awning: '#eab54e' },
 ];
 
-export function buildMap(id, scene) {
+export function buildMap(id, scene, seed = null) {
+  rng = seed == null ? Math.random : seededRandom(seed);
   if (id === 'village') return buildVillage(scene);
   if (id === 'jungle') return buildJungle(scene);
   if (id === 'warehouse') return buildCrateYard(scene);
@@ -538,7 +548,7 @@ function buildJungle(scene) {
   const giants = [[-20, -16, 1.1], [16, -24, 1.3], [28, 12, 1], [-8, 22, 1.2], [-34, 6, 1], [8, 40, 1.1], [-28, -38, 1.2], [40, -10, 1.1], [-44, 28, 1], [22, -46, 1], [44, 34, 1.2], [-14, -2, 0.9]];
   giants.forEach(([x, z, s]) => b.bigTree(x, z, s));
   b.bigTree(-48, -12, 1); b.bigTree(50, 18, 1.1); b.bigTree(-6, -50, 1.2); b.bigTree(34, 48, 1);
-  b.sprinkle(22, (x, z) => b.tree(x, z, 0.9 + Math.random() * 0.5, '#4a7040', '#8fb85f'), 12);
+  b.sprinkle(22, (x, z) => b.tree(x, z, 0.9 + rng() * 0.5, '#4a7040', '#8fb85f'), 12);
   // caves to hide inside!
   b.cave(-30, -26, 1.4);
   b.cave(26, 28, 1.5);
@@ -569,7 +579,7 @@ function buildJungle(scene) {
     cap.position.set(x, 0.34, z);
     b.place(cap, { solid: false });
   });
-  b.sprinkle(20, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]));
+  b.sprinkle(20, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
   b.hill(bounds + 22, 0, 34, '#54774a'); b.hill(-bounds - 20, -20, 30, '#4c6f44'); b.hill(6, bounds + 24, 32, '#5b7f50');
   b.cloud(-30, 56, 20, 1.2); b.cloud(35, 62, -30, 1.4); b.cloud(0, 58, 55, 1);
   b.butterfly(-10, 6, '#eab54e'); b.butterfly(14, -12); b.butterfly(-24, 26, '#f2f0e4'); b.butterfly(30, 34, '#c9a3e0'); b.butterfly(0, -34, '#f2b6c9'); b.butterfly(-38, -18, '#eab54e');
@@ -623,8 +633,8 @@ function buildVillage(scene) {
 
   // palms + trees + garden bits
   for (const [x, z, s] of [[-7, -46, 1.1], [7.5, -8, 1], [-7, 26, 1.25], [8, 36, 0.95], [19, -24, 1.15], [-19, 8, 1.05], [-24, 42, 1.2], [26, 16, 1]]) b.palm(x, z, s);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 9 && !nearBigHouse(x, z)) b.tree(x, z, 0.9 + Math.random() * 0.5); }, 18);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 8 && !nearBigHouse(x, z)) b.bush(x, z, 0.9 + Math.random() * 0.5); }, 14);
+  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 9 && !nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
+  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 8 && !nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 14);
   // hedges + garden furniture + rocks
   b.box(-20, -12, 7, 1.6, 1, '#7fa05a');
   b.box(22, -2, 1, 1.6, 7, '#7fa05a');
@@ -642,7 +652,7 @@ function buildVillage(scene) {
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
-  b.sprinkle(48, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]); }, 8);
+  b.sprinkle(48, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]); }, 8);
   b.sprinkle(72, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.tuft(x, z, 0.9); }, 8);
   // garden huts you can hide inside
   b.hut(-20, 28, { door: 'E' });
@@ -685,11 +695,11 @@ function buildGarden(scene) {
   b.box(-14, -12, 5.4, 0.35, 4.8, '#cf7351', { y: 3 });
   // trees, palms + bushes
   b.tree(12, -12, 1.2); b.tree(16, 8, 1); b.tree(-8, 14, 1.1);
-  b.sprinkle(20, (x, z) => { if (!nearBigHouse(x, z)) b.tree(x, z, 0.9 + Math.random() * 0.5); }, 18);
+  b.sprinkle(20, (x, z) => { if (!nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
   b.palm(30, -26, 1.1); b.palm(-28, 24, 1.2); b.palm(36, 30, 1); b.palm(-36, -20, 1.15);
   b.bush(6, -6); b.bush(8, -4.5, 1.2); b.bush(-4, -16, 1.1); b.bush(18, -2, 1.3);
   b.bush(-18, 6, 1.2); b.bush(2, 16, 1); b.bush(4, 17.5, 1.2, '#5d7c40', '#94b25e');
-  b.sprinkle(22, (x, z) => { if (!nearBigHouse(x, z)) b.bush(x, z, 0.9 + Math.random() * 0.5); }, 18);
+  b.sprinkle(22, (x, z) => { if (!nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 18);
   // bigger hedge maze
   b.box(10, 14, 8, 1.8, 1, '#7fa05a');
   b.box(13.5, 10.5, 1, 1.8, 8, '#7fa05a');
@@ -711,7 +721,7 @@ function buildGarden(scene) {
     stone.position.set(sx, 0.04, sz);
     b.place(stone, { cast: false });
   }
-  b.sprinkle(46, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]));
+  b.sprinkle(46, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
   b.sprinkle(68, (x, z) => b.tuft(x, z, 0.9));
   b.hut(20, -30, { door: 'N', wall: '#e6d1a8', roof: '#8aa864' });
   b.hut(-34, 34, { door: 'E', wall: '#d9c2cf', roof: '#a86a6a' });
@@ -755,7 +765,7 @@ function buildCrateYard(scene) {
   }
   // pastel barrels
   const barrelCols = ['#6f93b3', '#eab54e', '#8aa864', '#9c6b8f', '#d07a5e', '#5ba393'];
-  b.sprinkle(18, (x, z) => b.cylinder(x, z, 0.7, 1.6, barrelCols[Math.floor(Math.random() * 6)]), 10);
+  b.sprinkle(18, (x, z) => b.cylinder(x, z, 0.7, 1.6, barrelCols[Math.floor(rng() * 6)]), 10);
   b.sprinkle(46, (x, z) => b.tuft(x, z, 0.9, '#a99a5c', '#d9cc84'));
   b.palm(-42, -40, 1.2); b.palm(44, 40, 1.1);
   b.hill(bounds + 18, 10, 26, '#c4b083'); b.hill(-bounds - 16, -18, 24, '#b9a878');
@@ -774,11 +784,11 @@ function buildMeadow(scene) {
   b.fence(2.5, '#c9a06a');
   const spots = [[-18, -14], [-10, -20], [6, -18], [16, -10], [20, 4], [14, 16], [2, 20], [-12, 16], [-20, 6], [-6, -8], [8, 6], [-15, -3]];
   spots.forEach(([x, z], i) => b.tree(x, z, 0.9 + (i % 3) * 0.25, '#7c8b44', '#e3d878'));
-  b.sprinkle(32, (x, z) => b.tree(x, z, 0.85 + Math.random() * 0.6, '#7c8b44', '#e3d878'), 22);
+  b.sprinkle(32, (x, z) => b.tree(x, z, 0.85 + rng() * 0.6, '#7c8b44', '#e3d878'), 22);
   // tall golden grass to lie down in
   for (const [gx, gz, gs] of [[-6, 10, 1.4], [10, -6, 1.2], [18, 12, 1], [-16, -18, 1.3], [30, -26, 1.5], [-34, 22, 1.4], [24, 34, 1.2], [-28, -36, 1.3]]) {
     for (let i = 0; i < 10 * gs; i++) {
-      const a = Math.random() * Math.PI * 2, r = Math.random() * 2 * gs;
+      const a = rng() * Math.PI * 2, r = rng() * 2 * gs;
       b.tuft(gx + Math.cos(a) * r, gz + Math.sin(a) * r, 1.5, '#a3a353', '#e8d98a');
     }
   }
@@ -809,7 +819,7 @@ function buildMeadow(scene) {
     pad.position.set(px, 0.04, pz);
     scene.add(pad);
   }
-  b.sprinkle(30, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]));
+  b.sprinkle(30, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
   b.sprinkle(36, (x, z) => b.tuft(x, z, 1, '#a3a353', '#ddd07e'));
   b.hut(-30, 8, { door: 'S', wall: '#c9b489', roof: '#8a7048' });
   b.hill(bounds + 20, 14, 30, '#a8a460'); b.hill(-bounds - 22, -10, 34, '#9c9a58'); b.hill(-10, bounds + 22, 28, '#b0ae66');

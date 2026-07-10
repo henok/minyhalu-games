@@ -242,6 +242,9 @@
           <input type="text" id="codeInput" class="grow" maxlength="4" placeholder="4-letter code" style="text-transform:uppercase">
           <button class="btn pink" id="joinBtn">Join!</button>
         </div>
+        <div class="divider">— or —</div>
+        <button class="btn green big" id="quickBtn">⚡ Quick join</button>
+        <p class="hint" id="quickHint" style="text-align:center"></p>
       </div>
       <div>
         <h2>🔴 Live games</h2>
@@ -287,6 +290,15 @@
             <option value="60">⏱️ 60 seconds</option>
             <option value="90">⏱️ 90 seconds</option>
           </select>
+          <h2>5. Robot players</h2>
+          <div class="row">
+            <label class="grow" style="font-size:0.9rem; color:#8c7a52">🤖🙈 Robot hiders
+              <select id="botHiders"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select>
+            </label>
+            <label class="grow" style="font-size:0.9rem; color:#8c7a52">🤖🔍 Robot seekers
+              <select id="botSeekers"><option>0</option><option>1</option><option>2</option><option>3</option></select>
+            </label>
+          </div>
         </div>
         <div style="margin-top:16px">
           <button class="btn green big hostOnly" id="startBtn">🚀 Start the game!</button>

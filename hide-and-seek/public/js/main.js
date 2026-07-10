@@ -322,11 +322,15 @@ function renderLobby() {
     const roleTag = `<span class="tag ${p.role}">${p.role === 'hider' ? '🙈 hider' : '🔍 seeker'}</span>`;
     const hostTag = p.id === hostId ? '<span class="tag host">👑 host</span>' : '';
     let readyTag = '';
-    if (inLobby && p.id !== hostId) readyTag = p.ready ? '✅' : '⏳';
+    if (inLobby && p.id !== hostId && !p.bot) readyTag = p.ready ? '✅' : '⏳';
     if (p.playing === false) readyTag = '🛋️ setting up';
-    li.innerHTML = `<span>${p.id === myId ? '⭐' : '🧑'}</span> <span class="grow">${escapeHtml(p.name)}</span> ${readyTag} ${roleTag} ${hostTag}`;
+    const icon = p.bot ? '🤖' : (p.id === myId ? '⭐' : '🧑');
+    li.innerHTML = `<span>${icon}</span> <span class="grow">${escapeHtml(p.name)}</span> ${readyTag} ${roleTag} ${hostTag}`;
     list.appendChild(li);
   }
+  // reflect the room's robot counts in the host's selectors
+  $('botHiders').value = String(roomPlayers.filter(p => p.bot && p.role === 'hider').length);
+  $('botSeekers').value = String(roomPlayers.filter(p => p.bot && p.role === 'seeker').length);
   document.querySelectorAll('.hostOnly').forEach(el => (el.hidden = !isHost));
 
   // host: Start unlocks only with both roles filled and everyone ready
@@ -372,7 +376,24 @@ async function ensureConnected() {
   if (net.ws && net.ws.readyState === 0) return false; // still connecting
   try { await net.connect(); return true; } catch { return false; }
 }
+let quickPending = false;
 net.on('games', (m) => {
+  // quick join: pick the busiest game automatically
+  if (quickPending) {
+    quickPending = false;
+    const sorted = [...m.games].sort((a, b) => b.players - a.players);
+    if (!sorted.length) {
+      $('quickHint').textContent = 'No games to join right now — start one!';
+    } else {
+      $('quickHint').textContent = 'Deciding on game to join…';
+      const best = sorted[0];
+      setTimeout(() => {
+        $('quickHint').textContent = '';
+        $('codeInput').value = best.code;
+        enterRoom('join');
+      }, 900);
+    }
+  }
   const box = $('gamesList');
   box.innerHTML = '';
   if (!m.games.length) {
@@ -384,7 +405,9 @@ net.on('games', (m) => {
     row.className = 'gameRow';
     const info = document.createElement('span');
     info.className = 'grow';
-    info.textContent = `${(MAPS[g.map]?.name || g.map)} · ${g.host}'s game · ${g.players} playing`;
+    const bots = g.bots ? ` +${g.bots}🤖` : '';
+    const live = (g.phase === 'hide' || g.phase === 'seek') ? ' · in round' : '';
+    info.textContent = `${(MAPS[g.map]?.name || g.map)} · ${g.host}'s game · ${g.players} playing${bots}${live}`;
     const btn = document.createElement('button');
     btn.className = 'joinMini';
     btn.textContent = 'Join ' + g.code;
@@ -393,6 +416,13 @@ net.on('games', (m) => {
     box.appendChild(row);
   }
 });
+
+$('quickBtn').onclick = async () => {
+  if (!(await ensureConnected())) { toast('Could not reach the server'); return; }
+  quickPending = true;
+  $('quickHint').textContent = 'Looking for games…';
+  net.send({ t: 'list' });
+};
 async function refreshGames() {
   if ($('joinCard').hidden || $('lobby').hidden) return;
   if (await ensureConnected()) {
@@ -473,6 +503,9 @@ $('readyBtn').onclick = () => {
   net.send({ t: 'ready', ready: !(mine && mine.ready) });
 };
 $('hideTimeSel').onchange = (e) => { if (isHost) net.send({ t: 'setHideTime', secs: +e.target.value }); };
+const sendBots = () => net.send({ t: 'setBots', hiders: +$('botHiders').value, seekers: +$('botSeekers').value });
+$('botHiders').onchange = sendBots;
+$('botSeekers').onchange = sendBots;
 
 $('jumpBtn').onclick = () => {
   if (!pendingRound) return;
@@ -666,7 +699,10 @@ function startRound(ends, ammoList = []) {
   me.pose = 'stand';
   remoteCaught.clear(); // fresh round, nobody is caught yet
   scene = new THREE.Scene();
-  world = buildMap(currentMap, scene);
+  // seed by room code: everyone in the room builds the exact same world
+  const seed = [...$('codeBadge').textContent].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  world = buildMap(currentMap, scene, seed);
+  if (isHost) net.send({ t: 'mapData', colliders: world.colliders }); // bots need walls
   spawnAmmoBoxes(ammoList);
 
   // my avatar + spawn

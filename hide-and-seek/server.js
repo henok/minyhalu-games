@@ -100,7 +100,7 @@ function send(ws, obj) {
 function broadcast(room, obj, exceptId = null) {
   const msg = JSON.stringify(obj);
   for (const p of room.players.values()) {
-    if (p.id !== exceptId && p.ws.readyState === 1) p.ws.send(msg);
+    if (p.id !== exceptId && p.ws && p.ws.readyState === 1) p.ws.send(msg); // bots have no socket
   }
 }
 
@@ -115,7 +115,7 @@ function roomInfo(room) {
     hideTime: room.hideTime,
     players: [...room.players.values()].map(p => ({
       id: p.id, name: p.name, role: p.role, caught: p.caught, ammo: p.ammo, avatar: p.avatar,
-      ready: p.ready, playing: p.playing,
+      ready: p.ready, playing: p.playing, bot: !!p.bot,
     })),
   };
 }
@@ -131,6 +131,158 @@ function clearTimers(room) {
 
 function liveAmmoBoxes(room) {
   return (room.ammoBoxes || []).filter(b => !b.taken).map(b => [b.id, b.x, b.z]);
+}
+
+// ---------- robot players ----------
+const BOT_NAMES = ['Robo Beep', 'Robo Zip', 'Robo Bolt', 'Robo Pixel', 'Robo Gizmo', 'Robo Dot', 'Robo Sprocket', 'Robo Widget', 'Robo Fizz'];
+const BOT_MODELS = ['classic_boy', 'classic_girl', 'robot', 'fox', 'xbot'];
+const BOT_SKINS = ['#f9d5b3', '#eab68a', '#d29b6c', '#a86a3c', '#7a4a24', '#4d2c15'];
+const BOT_SHIRTS = ['#d96f4e', '#eab54e', '#8aa864', '#6f93b3', '#9c6b8f', '#5ba393', '#e58a91'];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+
+function makeBot(room, role) {
+  return {
+    id: nextId++, ws: null, bot: true, room,
+    name: BOT_NAMES.find(n => ![...room.players.values()].some(p => p.name === n)) || ('Robo ' + nextId),
+    role,
+    avatar: {
+      h: +(0.85 + Math.random() * 0.4).toFixed(2),
+      w: +(0.8 + Math.random() * 0.5).toFixed(2),
+      skin: pick(BOT_SKINS), shirt: pick(BOT_SHIRTS), model: pick(BOT_MODELS),
+    },
+    pos: [0, 0, 0], ry: 0, pose: 'stand', ammo: 0, caught: false,
+    ready: true, playing: true, eliminated: false,
+    finds: 0, caughtAtMs: null, spawnAtMs: null, accountKey: null, guestKey: 'bot',
+    wp: null, wpT: 0, cd: 0,
+  };
+}
+
+function srvBlocked(room, x, z) {
+  if (!room.colliders) return false; // no map data yet — bots roam freely
+  for (const c of room.colliders) {
+    if (x > c.minX - 0.38 && x < c.maxX + 0.38 &&
+        z > c.minZ - 0.38 && z < c.maxZ + 0.38 &&
+        c.top > 0.45 && (c.base || 0) < 1.7) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const dist2d = (a, b) => Math.hypot(a[0] - b[0], a[2] - b[2]);
+
+// rough line-of-sight: walls (tall grounded colliders) block a bot's view
+function srvLOS(room, a, b) {
+  if (!room.colliders) return true;
+  const steps = Math.max(2, Math.ceil(dist2d(a, b)));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const x = a[0] + (b[0] - a[0]) * t;
+    const z = a[2] + (b[2] - a[2]) * t;
+    for (const c of room.colliders) {
+      if (c.top > 1.4 && (c.base || 0) < 1.2 &&
+          x > c.minX && x < c.maxX && z > c.minZ && z < c.maxZ) return false;
+    }
+  }
+  return true;
+}
+
+function updateBots(room, dt) {
+  if (room.phase !== 'hide' && room.phase !== 'seek') return;
+  const players = [...room.players.values()];
+  const bounds = (MAP_BOUNDS[room.map] || 50) - 3;
+  for (const b of players) {
+    if (!b.bot || b.caught || b.eliminated) continue;
+    const isSeeker = b.role === 'seeker';
+    if (isSeeker && room.phase !== 'seek') continue; // eyes covered during hiding
+    b.cd = Math.max(0, b.cd - dt);
+    let target = null;
+    let sneaking = false;
+
+    if (isSeeker) {
+      // hunt the nearest hider; top up darts when running low
+      const prey = players
+        .filter(p => p.role === 'hider' && p.playing && !p.caught)
+        .map(p => ({ p, d: dist2d(b.pos, p.pos) }))
+        .sort((a, y) => a.d - y.d)[0];
+      const seesPrey = prey && prey.d < 16 && srvLOS(room, b.pos, prey.p.pos);
+      if (seesPrey) target = prey.p.pos;
+      if (seesPrey && prey.d < 3.5 && b.cd <= 0 && b.ammo > 0) {
+        b.cd = 1.8;
+        b.ammo--;
+        let hitId = null;
+        if (Math.random() < 0.6) {
+          prey.p.caught = true;
+          prey.p.caughtAtMs = Date.now();
+          b.finds++;
+          hitId = prey.p.id;
+        }
+        broadcast(room, { t: 'shot', by: b.id, from: [b.pos[0], 1.4, b.pos[2]], to: [prey.p.pos[0], 1, prey.p.pos[2]], hit: hitId, ammo: b.ammo });
+        if (hitId) broadcast(room, { t: 'caught', id: hitId, by: b.id, byName: b.name });
+        checkWin(room);
+        checkElimination(room);
+        if (room.phase !== 'seek') return;
+      }
+      if (!target && b.ammo <= 3 && (b.ammoGranted || 0) < RULES.MAX_AMMO) {
+        const box = (room.ammoBoxes || [])
+          .filter(x => !x.taken)
+          .map(x => ({ x, d: Math.hypot(x.x - b.pos[0], x.z - b.pos[2]) }))
+          .sort((a, y) => a.d - y.d)[0];
+        if (box && box.d < 30) target = [box.x.x, 0, box.x.z];
+        if (box && box.d < 2) {
+          const grant = Math.min(RULES.AMMO_PICKUP, RULES.MAX_AMMO - (b.ammoGranted || 0));
+          if (grant > 0) {
+            box.x.taken = true;
+            b.ammoGranted = (b.ammoGranted || 0) + grant;
+            b.ammo += grant;
+            broadcast(room, { t: 'ammoTaken', id: box.x.id, by: b.id, byName: b.name, ammo: b.ammo, grant });
+          }
+        }
+      }
+    } else if (room.phase === 'seek') {
+      // hider: run from any seeker that gets close
+      const hunter = players
+        .filter(p => p.role === 'seeker' && !p.eliminated && !p.caught)
+        .map(p => ({ p, d: dist2d(b.pos, p.pos) }))
+        .sort((a, y) => a.d - y.d)[0];
+      if (hunter && hunter.d < 10) {
+        const ax = b.pos[0] - hunter.p.pos[0], az = b.pos[2] - hunter.p.pos[2];
+        const al = Math.hypot(ax, az) || 1;
+        target = [
+          Math.max(-bounds, Math.min(bounds, b.pos[0] + (ax / al) * 14)),
+          0,
+          Math.max(-bounds, Math.min(bounds, b.pos[2] + (az / al) * 14)),
+        ];
+        b.wp = null;
+      } else {
+        sneaking = true; // no one near: stay low at the hiding spot
+      }
+    }
+
+    if (!target) {
+      b.wpT -= dt;
+      if (!b.wp || dist2d(b.pos, b.wp) < 1.2 || b.wpT <= 0) {
+        b.wp = [(Math.random() * 2 - 1) * bounds * 0.85, 0, (Math.random() * 2 - 1) * bounds * 0.85];
+        b.wpT = 8 + Math.random() * 8;
+      }
+      target = b.wp;
+    }
+
+    const d = dist2d(b.pos, target);
+    if (d > 1.0) {
+      const step = (isSeeker ? 5.0 : 6.6) * dt;
+      const dx = (target[0] - b.pos[0]) / d, dz = (target[2] - b.pos[2]) / d;
+      const nx = b.pos[0] + dx * step, nz = b.pos[2] + dz * step;
+      if (!srvBlocked(room, nx, b.pos[2])) b.pos[0] = nx; else b.wp = null;
+      if (!srvBlocked(room, b.pos[0], nz)) b.pos[2] = nz; else b.wp = null;
+      b.pos[0] = Math.max(-bounds, Math.min(bounds, b.pos[0]));
+      b.pos[2] = Math.max(-bounds, Math.min(bounds, b.pos[2]));
+      b.ry = Math.atan2(-dx, -dz) + Math.PI;
+      b.pose = 'stand';
+    } else if (sneaking) {
+      b.pose = 'crouch'; // settled into a spot — stay small
+    }
+  }
 }
 
 function startGame(room) {
@@ -158,6 +310,12 @@ function startGame(room) {
     p.playing = true;
     p.eliminated = false;
     p.spawnAtMs = null;
+    if (p.bot) { // bots spread out from the start
+      const bb = (MAP_BOUNDS[room.map] || 50) * (p.role === 'hider' ? 0.6 : 0.15);
+      p.pos = [+((Math.random() * 2 - 1) * bb).toFixed(1), 0, +((Math.random() * 2 - 1) * bb).toFixed(1)];
+      p.wp = null;
+      p.cd = 2 + Math.random() * 2;
+    }
   }
   // scatter ammo boxes: enough for every seeker to reach the cap, plus spares
   const bounds = MAP_BOUNDS[room.map] || 50;
@@ -177,6 +335,7 @@ function startGame(room) {
   clearTimers(room);
   room.phaseTimer = setTimeout(() => beginSeek(room), room.hideTime);
   room.tick = setInterval(() => {
+    updateBots(room, 0.05);
     const states = [...room.players.values()].filter(p => p.playing).map(p => [p.id, ...p.pos, p.ry, p.pose]);
     broadcast(room, { t: 'state', players: states });
   }, 50);
@@ -199,12 +358,15 @@ function endGame(room, winner) {
   const now = Date.now();
   for (const p of room.players.values()) {
     if (!p.playing) continue; // joined but never jumped in — nothing to record
+    if (p.role === 'seeker' && p.finds > 0 && (!best || p.finds > best.finds)) {
+      best = { name: p.name, finds: p.finds }; // bots can win the crown...
+    }
+    if (p.bot) continue;                       // ...but never enter the scoreboard
     const rec = recFor(p);
     rec.stats.games++;
     if (p.role === 'seeker') {
       rec.stats.finds += p.finds;
       if (winner === 'seekers') rec.stats.wins++;
-      if (p.finds > 0 && (!best || p.finds > best.finds)) best = { name: p.name, finds: p.finds };
     } else {
       const start = Math.max(room.seekStartMs || now, p.spawnAtMs || 0);
       const hiddenUntil = p.caughtAtMs || now;
@@ -321,6 +483,30 @@ wss.on('connection', (ws) => {
         syncRoom(room);
         break;
       }
+      case 'setBots': {
+        // host chooses how many robot hiders/seekers fill out the game
+        if (!room || player.id !== room.hostId || room.phase !== 'lobby') return;
+        const nh = Math.min(6, Math.max(0, Math.round(msg.hiders) || 0));
+        const ns = Math.min(3, Math.max(0, Math.round(msg.seekers) || 0));
+        for (const [id, p] of [...room.players]) if (p.bot) room.players.delete(id);
+        for (let i = 0; i < nh; i++) { const bot = makeBot(room, 'hider'); room.players.set(bot.id, bot); }
+        for (let i = 0; i < ns; i++) { const bot = makeBot(room, 'seeker'); room.players.set(bot.id, bot); }
+        syncRoom(room);
+        break;
+      }
+      case 'mapData': {
+        // the host's client shares the map's collision boxes so bots
+        // don't wander through walls (decor is seeded, so all clients match)
+        if (!room || player.id !== room.hostId || !Array.isArray(msg.colliders)) return;
+        room.colliders = msg.colliders.slice(0, 800)
+          .map(c => ({
+            minX: +c.minX || 0, maxX: +c.maxX || 0,
+            minZ: +c.minZ || 0, maxZ: +c.maxZ || 0,
+            top: +c.top || 0, base: +c.base || 0,
+          }))
+          .filter(c => c.maxX > c.minX && c.maxZ > c.minZ);
+        break;
+      }
       case 'setHideTime': {
         if (room && player.id === room.hostId && Number.isFinite(msg.secs)) {
           room.hideTime = Math.min(120, Math.max(10, Math.round(msg.secs))) * 1000;
@@ -381,17 +567,19 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'list': {
-        // joinable games for the lobby browser — newest first
+        // every game is joinable now (running rounds accept late hiders) — newest first
         const games = [...rooms.values()]
-          .filter(r => r.phase === 'lobby' || r.phase === 'over')
           .sort((a, b) => b.createdAt - a.createdAt)
           .slice(0, 20)
           .map(r => {
             const hostPlayer = r.players.get(r.hostId);
+            const humans = [...r.players.values()].filter(p => !p.bot);
             return {
               code: r.code,
-              players: r.players.size,
+              players: humans.length,
+              bots: r.players.size - humans.length,
               map: r.map,
+              phase: r.phase,
               host: (hostPlayer && hostPlayer.name) || 'Someone',
             };
           });
@@ -481,13 +669,14 @@ wss.on('connection', (ws) => {
     const room = player.room;
     if (!room) return;
     room.players.delete(player.id);
-    if (room.players.size === 0) {
+    const humans = [...room.players.values()].filter(p => !p.bot);
+    if (humans.length === 0) { // a room of only robots plays to nobody
       clearTimers(room);
       rooms.delete(room.code);
       return;
     }
     if (room.hostId === player.id) {
-      room.hostId = [...room.players.keys()][0]; // pass host to the next player
+      room.hostId = humans[0].id; // pass host to the next HUMAN
     }
     broadcast(room, { t: 'left', id: player.id, name: player.name });
     syncRoom(room);

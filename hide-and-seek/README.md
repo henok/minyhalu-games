@@ -73,9 +73,17 @@ friends. (Or deploy the folder to any Node host like Render or Railway with
 
 ## Joining friends
 
-You can join by typing a 4-letter code — or just pick a game from the
-**Live games** list on the first screen. You can change your name any time
-from inside the room, and choose a boy or girl character in the editor.
+You can join by typing a 4-letter code, pick a game from the **Live games**
+list, or hit **⚡ Quick join** to automatically hop into the busiest game
+going. Running rounds accept new hiders any time. You can change your name
+from inside the room and pick any character in the editor.
+
+## Robot players
+
+Small group? The host can add up to 6 **robot hiders** and 3 **robot
+seekers** from the lobby. Robots hide, flee, hunt, shoot, and grab ammo boxes
+on their own (they can't see through walls, promise). They can win "best
+seeker" of the round but never enter the persistent scoreboard.
 
 ## Maps
 
