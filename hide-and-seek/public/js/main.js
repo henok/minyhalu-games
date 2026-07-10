@@ -11,6 +11,7 @@ const $ = (id) => document.getElementById(id);
 const HIDER_SPEED = 7.6;   // hiders are faster!
 const SEEKER_SPEED = 5.4;
 const POSE_SPEED = { stand: 1, crouch: 0.5, flat: 0.28, ball: 0.65 };
+const POSE_HEIGHT = { stand: 1.7, crouch: 1.0, flat: 0.5, ball: 0.9, dance: 1.7 }; // body height per pose
 const GRAVITY = -28;
 const JUMP_VEL = 9;
 const PLAYER_RADIUS = 0.38;
@@ -780,7 +781,7 @@ net.on('ammoTaken', (m) => {
     me.ammo = m.ammo;
     $('ammoPill').textContent = `🔫 ${me.ammo}`;
     sfx.pickup();
-    feed('🔫 +3 shots!');
+    feed(`🔫 +${m.grant || 3} darts!`);
   } else {
     feed(`${m.byName} grabbed an ammo box!`);
   }
@@ -1102,10 +1103,13 @@ function groundHeightAt(x, z, feetY) {
 }
 
 function blockedAt(x, z, feetY) {
+  // blocked only if the collider overlaps the body vertically — elevated
+  // floors can be walked UNDER, and crouching/crawling fits below low things
+  const bodyTop = feetY + (POSE_HEIGHT[me.pose] || 1.7);
   for (const c of world.colliders) {
     if (x > c.minX - PLAYER_RADIUS && x < c.maxX + PLAYER_RADIUS &&
         z > c.minZ - PLAYER_RADIUS && z < c.maxZ + PLAYER_RADIUS &&
-        feetY < c.top - 0.45) {
+        feetY < c.top - 0.45 && bodyTop > (c.base || 0)) {
       return true;
     }
   }

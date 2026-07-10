@@ -44,10 +44,15 @@ friends. (Or deploy the folder to any Node host like Render or Railway with
     instantly camouflage as whatever you're looking at
   - **Poses**: `1` stand, `2` crouch, `3` lie flat, `4` curl into a ball
     (sneaky poses make you slower, so choose wisely!)
-- **Seekers** 🔍 — get a tag-gun with **limited shots**
-  (2 per hider + 2 spare). Cover your eyes for 25 seconds while hiders hide,
-  then click to shoot whoever you find. Run out of shots and the hiders win!
-- Seekers win by finding everyone before the 3-minute timer ends.
+- **Seekers** 🔍 — get a tag-gun with **limited darts**: you start with 10 and
+  can grab more from the glowing ammo boxes around the map, up to a hard cap
+  of **20 per game**. Cover your eyes while the hiders hide, then click to
+  shoot whoever you find. Run dry with no boxes left and you're eliminated —
+  if every seeker is out, the hiders win!
+- Seekers win by finding everyone before the 4-minute timer ends.
+- Some maps have **two-story houses**: walk in the front door, climb the
+  stairs, and peek out the open upstairs windows — or hide up there disguised
+  as a chair, a potted plant or a floor lamp.
 
 ## Controls
 

@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { toonMat, toonVertexMat } from './avatar.js';
+import { makeProp } from './models.js';
 
 export const MAPS = {
   village: { name: '🏘️ Summer Village', desc: 'A sunny street with houses, palm trees and gardens' },
@@ -53,8 +54,9 @@ class Builder {
     if (solid) this.solids.push(mesh);
     return mesh;
   }
-  collideBox(x, z, w, d, top) {
-    this.colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top });
+  collideBox(x, z, w, d, top, base = 0) {
+    // base = the collider's bottom: things above head height can be walked under
+    this.colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top, base });
   }
   box(x, z, w, h, d, color, { collide = true, y = 0, solid = true, rotY = 0 } = {}) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMat(color));
@@ -63,7 +65,7 @@ class Builder {
     this.place(mesh, { solid });
     if (collide) {
       const half = rotY ? Math.max(w, d) : 0;
-      this.collideBox(x, z, half || w, half || d, y + h);
+      this.collideBox(x, z, half || w, half || d, y + h, y);
     }
     return mesh;
   }
@@ -72,7 +74,7 @@ class Builder {
     mesh.position.set(x, y + h / 2, z);
     mesh.rotation.z = tilt;
     this.place(mesh);
-    if (collide) this.colliders.push({ minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r, top: y + h });
+    if (collide) this.colliders.push({ minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r, top: y + h, base: y });
     return mesh;
   }
 
@@ -327,6 +329,68 @@ class Builder {
       this.animated.push({ kind: 'sway', obj: blob, phase: x + by, amp: 0.015 });
     }
   }
+  bigHouse(x, z, style = {}) {
+    // a real two-story house: walk in the door, climb the stairs, look out
+    // the open upstairs windows, hide behind the furniture
+    const { wall = '#efe0bd', roof = '#e0824f', awning = '#c9564a' } = style;
+    const w = 10, d = 8, t = 0.3, h1 = 3;          // footprint + ground floor height
+    const fl = 3.0;                                 // second floor slab sits at y=3.0..3.3
+    // ---- ground floor walls (door on the +z side) ----
+    this.box(x - 2.9, z + d / 2, 4.2, h1, t, wall);              // south, left of door
+    this.box(x + 2.9, z + d / 2, 4.2, h1, t, wall);              // south, right of door
+    this.box(x, z + d / 2, 1.6, 0.8, t, wall, { y: 2.2 });       // door header (walk under!)
+    this.box(x, z - d / 2, w, h1, t, wall);                      // north
+    this.box(x - w / 2, z, t, h1, d, wall);                      // west
+    this.box(x + w / 2, z, t, h1, d, wall);                      // east
+    // decorative ground-floor windows on the north face
+    for (const wx of [-2.6, 2.6]) {
+      const glass = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.1, 0.16), toonMat('#9fb9cf'));
+      glass.position.set(x + wx, 1.8, z - d / 2 - 0.05);
+      this.place(glass);
+    }
+    // awning over the door
+    const awn = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 1.1), toonMat(awning));
+    awn.position.set(x, 2.45, z + d / 2 + 0.5);
+    awn.rotation.x = 0.18;
+    this.place(awn);
+    // ---- staircase along the west wall (8 steps, 0.4 rise each) ----
+    for (let i = 1; i <= 8; i++) {
+      this.box(x - w / 2 + 0.9, z - d / 2 + 0.25 + i * 0.5, 1.4, 0.4 * i, 0.5, '#c99a63');
+    }
+    // ---- second floor slab, with the stairwell left open ----
+    this.box(x + 0.8, z, w - 1.6, 0.3, d, '#d3a870', { y: fl });                       // main slab
+    this.box(x - w / 2 + 0.8, z + d / 2 - 1.75, 1.6, 0.3, 3.5, '#d3a870', { y: fl }); // west strip past the stairwell
+    // ---- upstairs: waist-high parapet + roof band = big open windows all around ----
+    for (const [px, pz, pw, pd] of [
+      [x, z + d / 2, w, t], [x, z - d / 2, w, t], [x - w / 2, z, t, d], [x + w / 2, z, t, d],
+    ]) {
+      this.box(px, pz, pw, 0.9, pd, wall, { y: fl + 0.3 });   // parapet — lean over and look out
+      this.box(px, pz, pw, 0.5, pd, wall, { y: fl + 2.2 });   // band under the roof
+    }
+    for (const [cx, cz] of [[x - w / 2, z - d / 2], [x + w / 2, z - d / 2], [x - w / 2, z + d / 2], [x + w / 2, z + d / 2]]) {
+      this.box(cx, cz, 0.5, 2.4, 0.5, wall, { y: fl + 0.3 }); // corner posts
+    }
+    // ---- roof ----
+    const roofGeo = new THREE.ConeGeometry(0.74, 1, 4);
+    roofGeo.rotateY(Math.PI / 4);
+    const roofM = new THREE.Mesh(roofGeo, toonMat(roof));
+    roofM.scale.set(w * 1.12, 2.0, d * 1.12);
+    roofM.position.set(x, fl + 2.7 + 1.0, z);
+    this.place(roofM);
+    // ---- furniture to blend in with (chair/plant/lamp disguises fit right in) ----
+    const decor = (kind, dx, dz, y = 0) => {
+      const p = makeProp(kind);
+      p.position.set(x + dx, y, z + dz);
+      this.scene.add(p);
+      p.traverse(o => { if (o.isMesh) this.solids.push(o); });
+    };
+    decor('chair', 2.6, -1.2);
+    decor('chair', 3.4, 1.6);
+    decor('plant', -3.2, 2.8);
+    decor('lamp', 4.1, -2.9);
+    decor('plant', 2.2, 2.2, fl + 0.3);  // one upstairs
+    decor('lamp', -2.6, -2.6, fl + 0.3);
+  }
   lamp(x, z, side = 1) {
     const mat = toonMat('#5a6152');
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, 4.4, 8), mat);
@@ -544,6 +608,11 @@ function buildVillage(scene) {
   const R = [[12.5, -32, 1], [13, -14, 4], [12.5, 6, 0], [13, 24, 2], [12.5, 42, 1]];
   for (const [x, z, s] of L) b.house(x, z, Math.PI / 2, { ...HOUSE_STYLES[s], w: 6.5 + (s % 3), d: 5.5 + ((s + 1) % 2) });
   for (const [x, z, s] of R) b.house(x, z, -Math.PI / 2, { ...HOUSE_STYLES[s], w: 6.5 + ((s + 1) % 3), d: 5.5 + (s % 2) });
+  // two big walk-in houses with stairs and an upstairs to hide in
+  b.bigHouse(-24, -44, HOUSE_STYLES[1]);
+  b.bigHouse(24, 44, HOUSE_STYLES[2]);
+  const nearBigHouse = (px, pz) =>
+    (Math.abs(px + 24) < 7 && Math.abs(pz + 44) < 6) || (Math.abs(px - 24) < 7 && Math.abs(pz - 44) < 6);
 
   // street lamps
   for (let i = 0; i < 7; i++) {
@@ -554,8 +623,8 @@ function buildVillage(scene) {
 
   // palms + trees + garden bits
   for (const [x, z, s] of [[-7, -46, 1.1], [7.5, -8, 1], [-7, 26, 1.25], [8, 36, 0.95], [19, -24, 1.15], [-19, 8, 1.05], [-24, 42, 1.2], [26, 16, 1]]) b.palm(x, z, s);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 9) b.tree(x, z, 0.9 + Math.random() * 0.5); }, 18);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 8) b.bush(x, z, 0.9 + Math.random() * 0.5); }, 14);
+  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 9 && !nearBigHouse(x, z)) b.tree(x, z, 0.9 + Math.random() * 0.5); }, 18);
+  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 8 && !nearBigHouse(x, z)) b.bush(x, z, 0.9 + Math.random() * 0.5); }, 14);
   // hedges + garden furniture + rocks
   b.box(-20, -12, 7, 1.6, 1, '#7fa05a');
   b.box(22, -2, 1, 1.6, 7, '#7fa05a');
@@ -573,8 +642,8 @@ function buildVillage(scene) {
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
-  b.sprinkle(48, (x, z) => { if (Math.abs(x) > 7) b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]); }, 8);
-  b.sprinkle(72, (x, z) => { if (Math.abs(x) > 7) b.tuft(x, z, 0.9); }, 8);
+  b.sprinkle(48, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.flower(x, z, FLOWER_COLORS[Math.floor(Math.random() * 4)]); }, 8);
+  b.sprinkle(72, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.tuft(x, z, 0.9); }, 8);
   // garden huts you can hide inside
   b.hut(-20, 28, { door: 'E' });
   b.hut(20, -8, { door: 'W', wall: '#d9c2cf', roof: '#a86a6a' });
@@ -606,8 +675,9 @@ function buildGarden(scene) {
   b.lights({});
   b.ground('#a4cc6b', '#7ba14e');
   b.fence(2, '#e0bd8a');
-  // the family house in one corner + garden shed you can walk into
-  b.house(-32, -32, Math.PI / 4 * 2, HOUSE_STYLES[0]);
+  // the family house in one corner (two floors — go inside!) + garden shed
+  b.bigHouse(-32, -32, HOUSE_STYLES[0]);
+  const nearBigHouse = (px, pz) => Math.abs(px + 32) < 7 && Math.abs(pz + 32) < 6;
   b.box(-14, -14, 5, 3, 0.3, '#efe3c2');
   b.box(-16.4, -12, 0.3, 3, 4.3, '#efe3c2');
   b.box(-11.6, -12, 0.3, 3, 4.3, '#efe3c2');
@@ -615,11 +685,11 @@ function buildGarden(scene) {
   b.box(-14, -12, 5.4, 0.35, 4.8, '#cf7351', { y: 3 });
   // trees, palms + bushes
   b.tree(12, -12, 1.2); b.tree(16, 8, 1); b.tree(-8, 14, 1.1);
-  b.sprinkle(20, (x, z) => b.tree(x, z, 0.9 + Math.random() * 0.5), 18);
+  b.sprinkle(20, (x, z) => { if (!nearBigHouse(x, z)) b.tree(x, z, 0.9 + Math.random() * 0.5); }, 18);
   b.palm(30, -26, 1.1); b.palm(-28, 24, 1.2); b.palm(36, 30, 1); b.palm(-36, -20, 1.15);
   b.bush(6, -6); b.bush(8, -4.5, 1.2); b.bush(-4, -16, 1.1); b.bush(18, -2, 1.3);
   b.bush(-18, 6, 1.2); b.bush(2, 16, 1); b.bush(4, 17.5, 1.2, '#5d7c40', '#94b25e');
-  b.sprinkle(22, (x, z) => b.bush(x, z, 0.9 + Math.random() * 0.5), 18);
+  b.sprinkle(22, (x, z) => { if (!nearBigHouse(x, z)) b.bush(x, z, 0.9 + Math.random() * 0.5); }, 18);
   // bigger hedge maze
   b.box(10, 14, 8, 1.8, 1, '#7fa05a');
   b.box(13.5, 10.5, 1, 1.8, 8, '#7fa05a');

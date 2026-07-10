@@ -14,9 +14,9 @@ const PORT = process.env.PORT || 3000;
 const RULES = {
   HIDE_TIME: 30_000,        // default hiding time (the host can change it per room)
   SEEK_TIME: 240_000,       // how long seekers get to find everyone
-  SHOTS_PER_HIDER: 3,       // each seeker gets: hiders * this + EXTRA_SHOTS
-  EXTRA_SHOTS: 3,
-  AMMO_PICKUP: 3,           // shots gained per ammo box
+  START_AMMO: 10,           // darts each seeker starts with
+  MAX_AMMO: 20,             // hard cap per seeker per game (start + pickups)
+  AMMO_PICKUP: 3,           // darts gained per ammo box (never past the cap)
   MAX_SHOT_RANGE: 80,       // sanity check on hits
 };
 
@@ -146,10 +146,10 @@ function startGame(room) {
     if (hostWs) send(hostWs, { t: 'error', msg: 'Waiting for everyone to press Ready!' });
     return;
   }
-  const ammo = hiders.length * RULES.SHOTS_PER_HIDER + RULES.EXTRA_SHOTS;
   for (const p of room.players.values()) {
     p.caught = false;
-    p.ammo = p.role === 'seeker' ? ammo : 0;
+    p.ammo = p.role === 'seeker' ? RULES.START_AMMO : 0;
+    p.ammoGranted = p.ammo; // lifetime darts this game — capped at MAX_AMMO
     p.pos = [0, 0, 0];
     p.ry = 0;
     p.pose = 'stand';
@@ -159,10 +159,11 @@ function startGame(room) {
     p.eliminated = false;
     p.spawnAtMs = null;
   }
-  // scatter ammo boxes for seekers to top up
+  // scatter ammo boxes: enough for every seeker to reach the cap, plus spares
   const bounds = MAP_BOUNDS[room.map] || 50;
   room.ammoBoxes = [];
-  const n = 4 + hiders.length * 2;
+  const perSeeker = Math.ceil((RULES.MAX_AMMO - RULES.START_AMMO) / RULES.AMMO_PICKUP);
+  const n = seekers.length * perSeeker + 2;
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const r = bounds * (0.2 + Math.random() * 0.65);
@@ -228,10 +229,11 @@ function checkWin(room) {
 function checkElimination(room) {
   if (room.phase !== 'seek') return;
   const boxesLeft = (room.ammoBoxes || []).some(b => !b.taken);
-  if (boxesLeft) return; // still ammo on the map — nobody is out yet
   const seekers = [...room.players.values()].filter(p => p.role === 'seeker');
   for (const s of seekers) {
-    if (s.ammo <= 0 && !s.eliminated) {
+    // out of darts AND no way to get more (map empty, or already at the lifetime cap)
+    const capped = (s.ammoGranted || 0) >= RULES.MAX_AMMO;
+    if (s.ammo <= 0 && (capped || !boxesLeft) && !s.eliminated) {
       s.eliminated = true;
       broadcast(room, { t: 'eliminated', id: s.id, name: s.name });
     }
@@ -332,9 +334,12 @@ wss.on('connection', (ws) => {
         const box = (room.ammoBoxes || []).find(b => b.id === msg.id && !b.taken);
         if (!box) return;
         if (Math.hypot(box.x - player.pos[0], box.z - player.pos[2]) > 4) return;
+        const grant = Math.min(RULES.AMMO_PICKUP, RULES.MAX_AMMO - (player.ammoGranted || 0));
+        if (grant <= 0) return; // at the 20-dart lifetime cap — the box stays for others
         box.taken = true;
-        player.ammo += RULES.AMMO_PICKUP;
-        broadcast(room, { t: 'ammoTaken', id: box.id, by: player.id, byName: player.name, ammo: player.ammo });
+        player.ammoGranted = (player.ammoGranted || 0) + grant;
+        player.ammo += grant;
+        broadcast(room, { t: 'ammoTaken', id: box.id, by: player.id, byName: player.name, ammo: player.ammo, grant });
         checkElimination(room);
         break;
       }
@@ -440,7 +445,7 @@ wss.on('connection', (ws) => {
       }
       case 'disguise': {
         if (!room || player.role !== 'hider' || player.caught) return;
-        const PROPS = ['bush', 'crate', 'rock', 'barrel'];
+        const PROPS = ['bush', 'crate', 'rock', 'barrel', 'chair', 'plant', 'lamp'];
         const prop = PROPS.includes(msg.prop) ? msg.prop : null;
         broadcast(room, { t: 'disguised', id: player.id, prop });
         break;

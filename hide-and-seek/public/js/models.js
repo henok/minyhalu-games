@@ -32,6 +32,9 @@ export const PROPS = [
   { id: 'crate', label: '📦 Crate' },
   { id: 'rock', label: '🪨 Rock' },
   { id: 'barrel', label: '🛢️ Barrel' },
+  { id: 'chair', label: '🪑 Chair' },
+  { id: 'plant', label: '🪴 Plant' },
+  { id: 'lamp', label: '💡 Lamp' },
 ];
 
 // the props hiders can disguise as — kept close to the map dressing colors
@@ -58,6 +61,42 @@ export function makeProp(kind) {
       ring.position.y = y;
       g.add(ring);
     }
+  } else if (kind === 'chair') {
+    const wood = toonMat('#c99a63');
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.08, 0.5), wood);
+    seat.position.y = 0.45;
+    g.add(seat);
+    for (const [lx, lz] of [[-0.22, -0.19], [0.22, -0.19], [-0.22, 0.19], [0.22, 0.19]]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.45, 8), wood);
+      leg.position.set(lx, 0.22, lz);
+      g.add(leg);
+    }
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.62, 0.07), toonMat('#a97c47'));
+    back.position.set(0, 0.79, -0.22);
+    g.add(back);
+  } else if (kind === 'plant') {
+    const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.17, 0.36, 12), toonMat('#c96f4a'));
+    pot.position.y = 0.18;
+    g.add(pot);
+    for (const [bx, by, bz, br] of [[0, 0.62, 0, 0.28], [0.16, 0.5, 0.1, 0.18], [-0.15, 0.52, -0.08, 0.2]]) {
+      const leafy = new THREE.Mesh(new THREE.SphereGeometry(br, 8, 6), toonMat('#5d7c40'));
+      leafy.position.set(bx, by, bz);
+      leafy.scale.y = 1.25;
+      g.add(leafy);
+    }
+  } else if (kind === 'lamp') {
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.2, 0.06, 12), toonMat('#5a4632'));
+    base.position.y = 0.03;
+    g.add(base);
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.1, 8), toonMat('#5a4632'));
+    pole.position.y = 0.6;
+    g.add(pole);
+    const shade = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.28, 0.3, 12, 1, true), toonMat('#eab54e'));
+    shade.position.y = 1.22;
+    g.add(shade);
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6), new THREE.MeshBasicMaterial({ color: '#fff2c4', toneMapped: false }));
+    glow.position.y = 1.14;
+    g.add(glow);
   } else { // bush
     const blob = new THREE.Mesh(new THREE.SphereGeometry(0.75, 9, 7), toonMat('#6d8c4c'));
     blob.position.y = 0.6;

@@ -391,7 +391,7 @@ function buildClassicAvatar(cfg, gender) {
     hairMat
   );
   hair.scale.copy(skull.scale).multiplyScalar(1.05);
-  hair.rotation.x = -0.35;
+  hair.rotation.x = -0.55; // tilted well back so it never wraps over the face
   headG.add(hair);
 
   if (girl) {
@@ -420,10 +420,11 @@ function buildClassicAvatar(cfg, gender) {
   hatG.add(band);
   headG.add(hatG);
 
-  // friendly drawn face, bent to hug the front of the skull
+  // friendly drawn face, bent to hug the front of the skull —
+  // 1.12 margin keeps it clearly outside both the skull AND the hair shell
   const faceGeo = new THREE.CircleGeometry(headR * 0.78, 24);
   {
-    const a = 0.92 * headR * 1.03, b = 1.05 * headR * 1.03, cz = 0.92 * headR * 1.03;
+    const a = 0.92 * headR * 1.12, b = 1.05 * headR * 1.12, cz = 0.92 * headR * 1.12;
     const pos = faceGeo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), y = pos.getY(i);
