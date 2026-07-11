@@ -678,8 +678,37 @@ net.on('caught', (m) => {
 net.on('left', (m) => {
   feed(`👋 ${m.name} left the game`);
   const r = remotes.get(m.id);
-  if (r) { scene.remove(r.avatar.group); remotes.delete(m.id); }
+  if (r) {
+    if (r.prop) scene.remove(r.prop); // a disguised leaver takes their bush with them
+    scene.remove(r.avatar.group);
+    remotes.delete(m.id);
+  }
 });
+
+// ---------- leaving a game (back to the join screen, connection stays) ----------
+function leaveGame() {
+  net.send({ t: 'leave' });
+  phase = 'lobby';
+  pendingRound = null;
+  world = null;
+  myAvatar = null;
+  myProp = null;
+  remotes.clear();
+  remoteCaught.clear();
+  ammoMeshes = [];
+  roomPlayers = [];
+  document.exitPointerLock?.();
+  for (const id of ['hud', 'end', 'blind', 'banner', 'clickToPlay', 'palette', 'paintModal', 'roomCard']) $(id).hidden = true;
+  $('chatLog').innerHTML = '<div class="hint">Say hi while you wait!</div>';
+  $('joinCard').hidden = false;
+  $('lobby').hidden = false;
+  refreshGames();
+}
+$('leaveRoomBtn').onclick = leaveGame;
+$('leaveEndBtn').onclick = leaveGame;
+$('leavePill').onclick = () => {
+  if (confirm('Leave this game?')) leaveGame();
+};
 
 net.on('_closed', () => {
   if (phase !== 'lobby') toast('Lost connection to the game 😢 — refresh to rejoin');

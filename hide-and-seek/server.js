@@ -347,6 +347,7 @@ function beginSeek(room) {
   room.seekStartMs = Date.now();
   broadcast(room, { t: 'phase', phase: 'seek', endsAt: room.endsAt });
   room.phaseTimer = setTimeout(() => endGame(room, 'hiders'), RULES.SEEK_TIME);
+  checkWin(room); // players may have left during hiding — settle it now
 }
 
 function endGame(room, winner) {
@@ -460,6 +461,10 @@ wss.on('connection', (ws) => {
           syncRoom(target);
           send(ws, { t: 'phase', phase: target.phase, endsAt: target.endsAt, late: true, ammo: liveAmmoBoxes(target) });
         }
+        break;
+      }
+      case 'leave': { // walk out of the game but keep the connection alive
+        player.leaveRoom();
         break;
       }
       case 'spawn': { // late joiner finished setting up and jumps into the round
@@ -665,10 +670,14 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  function leaveRoom() {
     const room = player.room;
     if (!room) return;
     room.players.delete(player.id);
+    player.room = null;
+    player.ready = false;
+    player.playing = true;
+    player.caught = false;
     const humans = [...room.players.values()].filter(p => !p.bot);
     if (humans.length === 0) { // a room of only robots plays to nobody
       clearTimers(room);
@@ -682,7 +691,10 @@ wss.on('connection', (ws) => {
     syncRoom(room);
     checkWin(room);
     checkElimination(room);
-  });
+  }
+
+  ws.on('close', leaveRoom);
+  player.leaveRoom = leaveRoom;
 
   function joinRoom(p, room, msg) {
     p.room = room;

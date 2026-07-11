@@ -266,7 +266,10 @@
   <div class="card" id="roomCard" hidden>
     <div class="row" style="justify-content:space-between; margin-bottom: 10px;">
       <h1 style="font-size:1.5rem">Get ready!</h1>
-      <div id="codeBadge" title="Share this code with friends">----</div>
+      <div class="row" style="gap:10px">
+        <div id="codeBadge" title="Share this code with friends">----</div>
+        <button class="btn purple" id="leaveRoomBtn" title="Leave this game">🚪</button>
+      </div>
     </div>
     <div class="columns">
       <div class="col">
@@ -340,6 +343,7 @@
     <div class="pill" id="ammoPill" hidden>🔫 6</div>
     <div class="pill" id="leftPill">🙈 0 left</div>
     <div class="pill" id="musicPill" style="pointer-events:auto;cursor:pointer" title="Music on/off (M)">🎵</div>
+    <div class="pill" id="leavePill" style="pointer-events:auto;cursor:pointer" title="Leave this game">🚪</div>
   </div>
   <div id="crosshair" hidden>+</div>
   <div id="feed"></div>
@@ -359,6 +363,7 @@
   <div id="endTitle">🏆</div>
   <div id="endSub"></div>
   <button class="btn green big hostOnly" id="againBtn" style="max-width:340px">🔁 Back to lobby</button>
+  <button class="btn purple" id="leaveEndBtn">🚪 Leave game</button>
   <p class="hint" id="endWait" style="color:#ccc" hidden>Waiting for the host…</p>
 </div>
 
