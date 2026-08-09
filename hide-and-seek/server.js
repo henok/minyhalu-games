@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 const RULES = {
   HIDE_TIME: 30_000,        // default hiding time (the host can change it per room)
   SEEK_TIME: 240_000,       // how long seekers get to find everyone
-  START_AMMO: 10,           // darts each seeker starts with
-  MAX_AMMO: 20,             // hard cap per seeker per game (start + pickups)
+  START_AMMO: 5,            // default darts each seeker starts with (host can change)
+  MAX_AMMO: 50,             // default per-seeker cap for the game (host can change)
   AMMO_PICKUP: 3,           // darts gained per ammo box (never past the cap)
   MAX_SHOT_RANGE: 80,       // sanity check on hits
 };
@@ -113,6 +113,9 @@ function roomInfo(room) {
     phase: room.phase,
     endsAt: room.endsAt,
     hideTime: room.hideTime,
+    title: room.title,
+    startAmmo: room.startAmmo,
+    maxAmmo: room.maxAmmo,
     players: [...room.players.values()].map(p => ({
       id: p.id, name: p.name, role: p.role, caught: p.caught, ammo: p.ammo, avatar: p.avatar,
       ready: p.ready, playing: p.playing, bot: !!p.bot,
@@ -223,14 +226,14 @@ function updateBots(room, dt) {
         checkElimination(room);
         if (room.phase !== 'seek') return;
       }
-      if (!target && b.ammo <= 3 && (b.ammoGranted || 0) < RULES.MAX_AMMO) {
+      if (!target && b.ammo <= 3 && (b.ammoGranted || 0) < room.maxAmmo) {
         const box = (room.ammoBoxes || [])
           .filter(x => !x.taken)
           .map(x => ({ x, d: Math.hypot(x.x - b.pos[0], x.z - b.pos[2]) }))
           .sort((a, y) => a.d - y.d)[0];
         if (box && box.d < 30) target = [box.x.x, 0, box.x.z];
         if (box && box.d < 2) {
-          const grant = Math.min(RULES.AMMO_PICKUP, RULES.MAX_AMMO - (b.ammoGranted || 0));
+          const grant = Math.min(RULES.AMMO_PICKUP, room.maxAmmo - (b.ammoGranted || 0));
           if (grant > 0) {
             box.x.taken = true;
             b.ammoGranted = (b.ammoGranted || 0) + grant;
@@ -300,8 +303,8 @@ function startGame(room) {
   }
   for (const p of room.players.values()) {
     p.caught = false;
-    p.ammo = p.role === 'seeker' ? RULES.START_AMMO : 0;
-    p.ammoGranted = p.ammo; // lifetime darts this game — capped at MAX_AMMO
+    p.ammo = p.role === 'seeker' ? room.startAmmo : 0;
+    p.ammoGranted = p.ammo; // lifetime darts this game — capped at the room's max
     p.pos = [0, 0, 0];
     p.ry = 0;
     p.pose = 'stand';
@@ -320,8 +323,8 @@ function startGame(room) {
   // scatter ammo boxes: enough for every seeker to reach the cap, plus spares
   const bounds = MAP_BOUNDS[room.map] || 50;
   room.ammoBoxes = [];
-  const perSeeker = Math.ceil((RULES.MAX_AMMO - RULES.START_AMMO) / RULES.AMMO_PICKUP);
-  const n = seekers.length * perSeeker + 2;
+  const perSeeker = Math.ceil(Math.max(0, room.maxAmmo - room.startAmmo) / RULES.AMMO_PICKUP);
+  const n = Math.min(40, seekers.length * perSeeker + 2);
   for (let i = 0; i < n; i++) {
     const a = Math.random() * Math.PI * 2;
     const r = bounds * (0.2 + Math.random() * 0.65);
@@ -394,8 +397,8 @@ function checkElimination(room) {
   const boxesLeft = (room.ammoBoxes || []).some(b => !b.taken);
   const seekers = [...room.players.values()].filter(p => p.role === 'seeker');
   for (const s of seekers) {
-    // out of darts AND no way to get more (map empty, or already at the lifetime cap)
-    const capped = (s.ammoGranted || 0) >= RULES.MAX_AMMO;
+    // out of darts AND no way to get more (map empty, or already at the room's cap)
+    const capped = (s.ammoGranted || 0) >= room.maxAmmo;
     if (s.ammo <= 0 && (capped || !boxesLeft) && !s.eliminated) {
       s.eliminated = true;
       broadcast(room, { t: 'eliminated', id: s.id, name: s.name });
@@ -438,10 +441,13 @@ wss.on('connection', (ws) => {
     switch (msg.t) {
       case 'create': {
         const code = makeCode();
+        const title = String(msg.title || '').trim().slice(0, 24);
         const newRoom = {
           code, hostId: player.id, map: 'village', phase: 'lobby',
           players: new Map(), phaseTimer: null, tick: null, winner: null, endsAt: 0,
           createdAt: Date.now(), hideTime: RULES.HIDE_TIME, ammoBoxes: [],
+          title: title || (String(msg.name || 'Someone').slice(0, 16) + "'s game"),
+          startAmmo: RULES.START_AMMO, maxAmmo: RULES.MAX_AMMO,
         };
         rooms.set(code, newRoom);
         joinRoom(player, newRoom, msg);
@@ -519,14 +525,21 @@ wss.on('connection', (ws) => {
         }
         break;
       }
+      case 'setDarts': { // host tunes the dart economy for the room
+        if (!room || player.id !== room.hostId || room.phase !== 'lobby') return;
+        if (Number.isFinite(msg.start)) room.startAmmo = Math.min(50, Math.max(1, Math.round(msg.start)));
+        if (Number.isFinite(msg.max)) room.maxAmmo = Math.min(200, Math.max(room.startAmmo, Math.round(msg.max)));
+        syncRoom(room);
+        break;
+      }
       case 'ammo': { // seeker picks up an ammo box
         if (!room || (room.phase !== 'seek' && room.phase !== 'hide')) return;
         if (player.role !== 'seeker' || player.caught) return;
         const box = (room.ammoBoxes || []).find(b => b.id === msg.id && !b.taken);
         if (!box) return;
         if (Math.hypot(box.x - player.pos[0], box.z - player.pos[2]) > 4) return;
-        const grant = Math.min(RULES.AMMO_PICKUP, RULES.MAX_AMMO - (player.ammoGranted || 0));
-        if (grant <= 0) return; // at the 20-dart lifetime cap — the box stays for others
+        const grant = Math.min(RULES.AMMO_PICKUP, room.maxAmmo - (player.ammoGranted || 0));
+        if (grant <= 0) return; // at the room's dart cap — the box stays for others
         box.taken = true;
         player.ammoGranted = (player.ammoGranted || 0) + grant;
         player.ammo += grant;
@@ -581,6 +594,7 @@ wss.on('connection', (ws) => {
             const humans = [...r.players.values()].filter(p => !p.bot);
             return {
               code: r.code,
+              title: r.title,
               players: humans.length,
               bots: r.players.size - humans.length,
               map: r.map,

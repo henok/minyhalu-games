@@ -302,7 +302,7 @@ async function enterRoom(action) {
     toast('Could not reach the game server 😢');
     return;
   }
-  net.send({ t: action, code: $('codeInput').value, name: me.name, role: me.role, avatar: me.cfg });
+  net.send({ t: action, code: $('codeInput').value, title: $('roomTitleInput').value, name: me.name, role: me.role, avatar: me.cfg });
 }
 $('nameInput').value = localStorage.getItem('hsname') || '';
 $('createBtn').onclick = () => enterRoom('create');
@@ -407,7 +407,7 @@ net.on('games', (m) => {
     info.className = 'grow';
     const bots = g.bots ? ` +${g.bots}🤖` : '';
     const live = (g.phase === 'hide' || g.phase === 'seek') ? ' · in round' : '';
-    info.textContent = `${(MAPS[g.map]?.name || g.map)} · ${g.host}'s game · ${g.players} playing${bots}${live}`;
+    info.textContent = `${g.title || g.host + "'s game"} · ${(MAPS[g.map]?.name || g.map)} · ${g.players} playing${bots}${live}`;
     const btn = document.createElement('button');
     btn.className = 'joinMini';
     btn.textContent = 'Join ' + g.code;
@@ -506,6 +506,9 @@ $('hideTimeSel').onchange = (e) => { if (isHost) net.send({ t: 'setHideTime', se
 const sendBots = () => net.send({ t: 'setBots', hiders: +$('botHiders').value, seekers: +$('botSeekers').value });
 $('botHiders').onchange = sendBots;
 $('botSeekers').onchange = sendBots;
+const sendDarts = () => { if (isHost) net.send({ t: 'setDarts', start: +$('dartStart').value, max: +$('dartMax').value }); };
+$('dartStart').onchange = sendDarts;
+$('dartMax').onchange = sendDarts;
 
 $('jumpBtn').onclick = () => {
   if (!pendingRound) return;
@@ -526,6 +529,9 @@ net.on('room', (m) => {
   roomPlayers = m.players;
   showMap(m.map);
   if (m.hideTime) $('hideTimeSel').value = String(Math.round(m.hideTime / 1000));
+  if (m.title) $('roomTitle').textContent = m.title;
+  if (m.startAmmo) $('dartStart').value = String(m.startAmmo);
+  if (m.maxAmmo) $('dartMax').value = String(m.maxAmmo);
   const mine = m.players.find(p => p.id === myId);
   if (mine) {
     me.ammo = mine.ammo;
@@ -1155,6 +1161,27 @@ function showBanner(text) {
 }
 
 // ---------- physics + movement ----------
+// ray vs collision box (slab method) — used to keep the camera out of walls
+function rayAABB(o, d, c) {
+  let tmin = 0, tmax = Infinity;
+  const min = [c.minX, c.base || 0, c.minZ];
+  const max = [c.maxX, c.top, c.maxZ];
+  const oa = [o.x, o.y, o.z], da = [d.x, d.y, d.z];
+  for (let i = 0; i < 3; i++) {
+    if (Math.abs(da[i]) < 1e-8) {
+      if (oa[i] < min[i] || oa[i] > max[i]) return null;
+    } else {
+      let t1 = (min[i] - oa[i]) / da[i];
+      let t2 = (max[i] - oa[i]) / da[i];
+      if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return null;
+    }
+  }
+  return tmin > 0 ? tmin : null; // starting inside a box doesn't count
+}
+
 function groundHeightAt(x, z, feetY) {
   let top = 0;
   for (const c of world.colliders) {
@@ -1273,11 +1300,25 @@ function updateLocal(dt) {
   const back = new THREE.Vector3(Math.sin(camYaw) * cp, Math.sin(-pitch), Math.cos(camYaw) * cp);
   const right = new THREE.Vector3(Math.cos(camYaw), 0, -Math.sin(camYaw));
   // over-the-shoulder framing keeps the crosshair off the back of your head
-  const desired = me.pos.clone()
+  let desired = me.pos.clone()
     .addScaledVector(back, dist)
     .addScaledVector(right, 0.6)
     .add(new THREE.Vector3(0, 1.9, 0));
   const lookTarget = me.pos.clone().addScaledVector(right, 0.6).add(new THREE.Vector3(0, 1.45, 0));
+  // indoors (or behind a tree): pull the camera in so walls never hide you
+  {
+    const camDir = desired.clone().sub(lookTarget);
+    const maxD = camDir.length();
+    camDir.normalize();
+    let tHit = maxD;
+    for (const c of world.colliders) {
+      const h = rayAABB(lookTarget, camDir, c);
+      if (h != null && h < tHit) tHit = h;
+    }
+    if (tHit < maxD) {
+      desired = lookTarget.clone().addScaledVector(camDir, Math.max(1.0, tHit - 0.35));
+    }
+  }
   if (!camInit) { camPos.copy(desired); camLook.copy(lookTarget); camInit = true; }
   camPos.lerp(desired, 1 - Math.exp(-dt * 9));
   camLook.lerp(lookTarget, 1 - Math.exp(-dt * 13));
