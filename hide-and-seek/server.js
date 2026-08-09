@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 // ---- Game rules (tweak these!) ----
 const RULES = {
   HIDE_TIME: 30_000,        // default hiding time (the host can change it per room)
-  SEEK_TIME: 240_000,       // how long seekers get to find everyone
+  SEEK_TIME: 300_000,       // how long seekers get to find everyone (big maps!)
   START_AMMO: 5,            // default darts each seeker starts with (host can change)
   MAX_AMMO: 50,             // default per-seeker cap for the game (host can change)
   AMMO_PICKUP: 3,           // darts gained per ammo box (never past the cap)
@@ -21,7 +21,7 @@ const RULES = {
 };
 
 // playable radius per map — used to scatter ammo boxes
-const MAP_BOUNDS = { village: 60, jungle: 64, backyard: 44, warehouse: 52, forest: 60 };
+const MAP_BOUNDS = { village: 120, jungle: 128, backyard: 88, warehouse: 104, forest: 120 };
 
 // ---------- persistent scoreboard + optional accounts ----------
 const DATA_FILE = path.join(__dirname, 'data', 'stats.json');
@@ -177,7 +177,7 @@ const dist2d = (a, b) => Math.hypot(a[0] - b[0], a[2] - b[2]);
 // rough line-of-sight: walls (tall grounded colliders) block a bot's view
 function srvLOS(room, a, b) {
   if (!room.colliders) return true;
-  const steps = Math.max(2, Math.ceil(dist2d(a, b)));
+  const steps = Math.min(24, Math.max(2, Math.ceil(dist2d(a, b)))); // capped for big maps
   for (let i = 1; i < steps; i++) {
     const t = i / steps;
     const x = a[0] + (b[0] - a[0]) * t;
@@ -509,7 +509,7 @@ wss.on('connection', (ws) => {
         // the host's client shares the map's collision boxes so bots
         // don't wander through walls (decor is seeded, so all clients match)
         if (!room || player.id !== room.hostId || !Array.isArray(msg.colliders)) return;
-        room.colliders = msg.colliders.slice(0, 800)
+        room.colliders = msg.colliders.slice(0, 1500)
           .map(c => ({
             minX: +c.minX || 0, maxX: +c.maxX || 0,
             minZ: +c.minZ || 0, maxZ: +c.maxZ || 0,

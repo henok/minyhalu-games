@@ -48,6 +48,43 @@ function seededRandom(seed) {
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
 
+// ---- shared GPU resources: one geometry/material per LOOK, not per mesh ----
+// (big maps would otherwise allocate thousands of tiny buffers)
+const matCache = new Map();
+function toonMatC(color) {
+  let m = matCache.get(color);
+  if (!m) { m = toonMat(color); matCache.set(color, m); }
+  return m;
+}
+let tvMat = null;
+const toonVertexMatC = () => (tvMat ||= toonVertexMat());
+const gradGeoCache = new Map();
+function gradUnitGeo(kind, lo, hi) {
+  const key = kind + lo + hi;
+  if (!gradGeoCache.has(key)) {
+    let g;
+    if (kind === 'sphere') g = new THREE.SphereGeometry(1, 10, 8);
+    else if (kind === 'dodeca') g = new THREE.DodecahedronGeometry(1);
+    else { g = new THREE.ConeGeometry(0.09, 1, 5); g.translate(0, 0.5, 0); } // grass blade
+    gradientize(g, lo, hi);
+    gradGeoCache.set(key, g);
+  }
+  return gradGeoCache.get(key);
+}
+// a gradient blob (tree canopy, bush...) built from the shared unit sphere
+function gradBlob(lo, hi, r, squashY = 0.88) {
+  const m = new THREE.Mesh(gradUnitGeo('sphere', lo, hi), toonVertexMatC());
+  m.scale.set(r, r * squashY, r);
+  m.userData.camoColor = lo;
+  return m;
+}
+function gradRock(lo, hi, s) {
+  const m = new THREE.Mesh(gradUnitGeo('dodeca', lo, hi), toonVertexMatC());
+  m.scale.setScalar(s);
+  m.userData.camoColor = lo;
+  return m;
+}
+
 class Builder {
   constructor(scene, bounds) {
     this.scene = scene;
@@ -55,6 +92,8 @@ class Builder {
     this.solids = [];     // meshes bullets can hit / camo can sample
     this.colliders = [];  // {minX,maxX,minZ,maxZ,top} walk-blockers / climbables
     this.animated = [];   // {kind, obj, ...} updated every frame
+    this.tufts = [];      // deferred: baked into a few InstancedMeshes at the end
+    this.flowers = [];
   }
   place(mesh, { solid = true, cast = true, receive = true } = {}) {
     mesh.castShadow = cast;
@@ -68,7 +107,7 @@ class Builder {
     this.colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, top, base });
   }
   box(x, z, w, h, d, color, { collide = true, y = 0, solid = true, rotY = 0 } = {}) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMat(color));
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMatC(color));
     mesh.position.set(x, y + h / 2, z);
     mesh.rotation.y = rotY;
     this.place(mesh, { solid });
@@ -79,7 +118,7 @@ class Builder {
     return mesh;
   }
   cylinder(x, z, r, h, color, { collide = true, y = 0, r2 = null, tilt = 0 } = {}) {
-    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r2 ?? r, h, 10), toonMat(color));
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(r, r2 ?? r, h, 10), toonMatC(color));
     mesh.position.set(x, y + h / 2, z);
     mesh.rotation.z = tilt;
     this.place(mesh);
@@ -89,24 +128,30 @@ class Builder {
 
   // --- sky, light, ground ---
   sky(top, horizon) {
-    const R = Math.max(240, this.bounds * 4.2);
+    const R = Math.min(450, Math.max(240, this.bounds * 3));
     const geo = new THREE.SphereGeometry(R, 24, 12);
     gradientize(geo, horizon, top, R * 0.03, R * 0.85);
     const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, toneMapped: false }));
     this.scene.add(mesh);
     this.scene.background = new THREE.Color(horizon);
-    this.scene.fog = new THREE.Fog(horizon, this.bounds * 0.9, Math.max(140, this.bounds * 3.4));
+    // on massive maps the fog is also the draw-distance budget: the far side
+    // of the map melts into haze instead of costing GPU time
+    this.scene.fog = new THREE.Fog(horizon, Math.min(70, this.bounds * 0.6), Math.min(320, Math.max(150, this.bounds * 1.6)));
   }
   lights({ sunColor = '#ffdfae', sunPos = [26, 40, 16], sunI = 2.8, sky = '#fff3d8', ground = '#93a862', ambI = 1.5 }) {
     const sun = new THREE.DirectionalLight(sunColor, sunI);
     sun.position.set(...sunPos);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(4096, 4096);
-    const B = this.bounds * 1.25;
-    Object.assign(sun.shadow.camera, { left: -B, right: B, top: B, bottom: -B, near: 1, far: 220 });
+    // a tight shadow box that FOLLOWS the player: sharp shadows at any map
+    // size, and a quarter of the texture memory of one giant map-wide shadow
+    sun.shadow.mapSize.set(2048, 2048);
+    Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 1, far: 300 });
     sun.shadow.bias = -0.0006;
     this.scene.add(sun);
+    this.scene.add(sun.target);
     this.scene.add(new THREE.HemisphereLight(sky, ground, ambI));
+    this.sun = sun;
+    this.sunOffset = new THREE.Vector3(...sunPos).normalize().multiplyScalar(110);
   }
   ground(inner, outer) {
     const size = this.bounds * 2.6;
@@ -137,9 +182,8 @@ class Builder {
       [-0.8 * s, 2.7 * s, -0.4 * s, 0.9 * s],
     ];
     for (const [bx, by, bz, br] of blobs) {
-      const blob = gradMesh(new THREE.SphereGeometry(br, 10, 8), lo, hi, { camo: lo });
+      const blob = gradBlob(lo, hi, br);
       blob.position.set(x + bx + tilt * 2, by, z + bz);
-      blob.scale.y = 0.88;
       this.place(blob);
       this.animated.push({ kind: 'sway', obj: blob, phase: x + z + by, amp: 0.02 });
     }
@@ -147,7 +191,7 @@ class Builder {
   palm(x, z, s = 1) {
     const g = new THREE.Group();
     const lean = (rng() - 0.5) * 0.55;
-    const trunkMat = toonMat('#b3946a');
+    const trunkMat = toonMatC('#b3946a');
     let px = 0, py = 0;
     for (let i = 0; i < 5; i++) {
       const seg = new THREE.Mesh(
@@ -164,7 +208,7 @@ class Builder {
     }
     const crown = new THREE.Group();
     crown.position.set(px, py + 0.05 * s, 0);
-    const frondMat = toonMat('#4e8a4e');
+    const frondMat = toonMatC('#4e8a4e');
     for (let i = 0; i < 7; i++) {
       const geo = new THREE.SphereGeometry(1, 8, 4);
       geo.scale(1.25 * s, 0.07 * s, 0.34 * s);
@@ -176,7 +220,7 @@ class Builder {
       crown.add(frond);
       this.solids.push(frond);
     }
-    const cocoMat = toonMat('#7a5230');
+    const cocoMat = toonMatC('#7a5230');
     for (const [cx, cz] of [[0.16 * s, 0.1 * s], [-0.12 * s, 0.14 * s], [0.05 * s, -0.16 * s]]) {
       const coco = new THREE.Mesh(new THREE.SphereGeometry(0.13 * s, 7, 6), cocoMat);
       coco.position.set(cx, -0.12 * s, cz);
@@ -189,41 +233,77 @@ class Builder {
     this.animated.push({ kind: 'sway', obj: crown, phase: x * 2, amp: 0.05 });
   }
   bush(x, z, s = 1, lo = '#6d8c4c', hi = '#a9c46b') {
-    const blob = gradMesh(new THREE.SphereGeometry(0.9 * s, 9, 7), lo, hi, { camo: lo });
+    const blob = gradBlob(lo, hi, 0.9 * s, 0.73);
+    blob.scale.x *= 1.1; blob.scale.z *= 1.1;
     blob.position.set(x, 0.62 * s, z);
-    blob.scale.set(1.1, 0.8, 1.1);
     this.place(blob);
-    const puff = gradMesh(new THREE.SphereGeometry(0.55 * s, 8, 6), lo, hi, { camo: lo });
+    const puff = gradBlob(lo, hi, 0.55 * s, 1);
     puff.position.set(x + 0.5 * s, 0.5 * s, z - 0.3 * s);
     this.place(puff);
     this.colliders.push({ minX: x - 0.6 * s, maxX: x + 0.6 * s, minZ: z - 0.6 * s, maxZ: z + 0.6 * s, top: 1.1 * s });
     this.animated.push({ kind: 'sway', obj: blob, phase: x * 3, amp: 0.015 });
   }
+  // grass and flowers are deferred and baked into a handful of InstancedMeshes —
+  // hundreds of tufts become 1-2 draw calls instead of 1000+
   tuft(x, z, s = 1, lo = '#87a552', hi = '#d6cf7c') {
-    const g = new THREE.Group();
-    const n = 3 + Math.floor(rng() * 3);
-    for (let i = 0; i < n; i++) {
-      const blade = gradMesh(new THREE.ConeGeometry(0.09 * s, (0.55 + rng() * 0.5) * s, 5), lo, hi);
-      blade.position.set((rng() - 0.5) * 0.5 * s, blade.geometry.parameters.height / 2, (rng() - 0.5) * 0.5 * s);
-      blade.rotation.z = (rng() - 0.5) * 0.25;
-      blade.castShadow = false;
-      g.add(blade);
-    }
-    g.position.set(x, 0, z);
-    this.scene.add(g);
-    this.animated.push({ kind: 'sway', obj: g, phase: x * 1.7 + z, amp: 0.09 });
+    this.tufts.push({ x, z, s, lo, hi });
   }
   flower(x, z, color) {
-    const g = new THREE.Group();
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.02, 0.3), toonMat('#7a9a4e'));
-    stem.position.y = 0.15;
-    g.add(stem);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), toonMat(color));
-    head.position.y = 0.33;
-    g.add(head);
-    g.position.set(x, 0, z);
-    this.scene.add(g);
-    this.animated.push({ kind: 'sway', obj: g, phase: x + z * 2, amp: 0.12 });
+    this.flowers.push({ x, z, color });
+  }
+  buildDecor() {
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+    const p3 = new THREE.Vector3(), s3 = new THREE.Vector3();
+    // --- grass blades, grouped by palette ---
+    const palettes = new Map();
+    for (const t of this.tufts) {
+      const k = t.lo + t.hi;
+      if (!palettes.has(k)) palettes.set(k, { lo: t.lo, hi: t.hi, blades: [] });
+      const g = palettes.get(k);
+      const n = 3 + Math.floor(rng() * 3);
+      for (let i = 0; i < n; i++) {
+        g.blades.push({
+          x: t.x + (rng() - 0.5) * 0.5 * t.s,
+          z: t.z + (rng() - 0.5) * 0.5 * t.s,
+          h: (0.55 + rng() * 0.5) * t.s,
+          s: t.s,
+          rz: (rng() - 0.5) * 0.25,
+          ry: rng() * Math.PI,
+        });
+      }
+    }
+    for (const g of palettes.values()) {
+      const im = new THREE.InstancedMesh(gradUnitGeo('blade', g.lo, g.hi), toonVertexMatC(), g.blades.length);
+      g.blades.forEach((b, i) => {
+        e.set(0, b.ry, b.rz);
+        q.setFromEuler(e);
+        m4.compose(p3.set(b.x, 0, b.z), q, s3.set(b.s, b.h, b.s));
+        im.setMatrixAt(i, m4);
+      });
+      im.castShadow = false;
+      im.receiveShadow = true;
+      this.scene.add(im);
+    }
+    // --- flowers: one instanced stem mesh + one instanced head mesh ---
+    if (this.flowers.length) {
+      const stemGeo = new THREE.CylinderGeometry(0.015, 0.02, 0.3);
+      stemGeo.translate(0, 0.15, 0);
+      const stems = new THREE.InstancedMesh(stemGeo, toonMatC('#7a9a4e'), this.flowers.length);
+      const headGeo = new THREE.SphereGeometry(0.07, 8, 6);
+      headGeo.translate(0, 0.33, 0);
+      const heads = new THREE.InstancedMesh(headGeo, toonMatC('#ffffff'), this.flowers.length);
+      const col = new THREE.Color();
+      this.flowers.forEach((f, i) => {
+        m4.makeTranslation(f.x, 0, f.z);
+        stems.setMatrixAt(i, m4);
+        heads.setMatrixAt(i, m4);
+        heads.setColorAt(i, col.set(f.color));
+      });
+      if (heads.instanceColor) heads.instanceColor.needsUpdate = true;
+      stems.castShadow = false;
+      heads.castShadow = false;
+      this.scene.add(stems, heads);
+    }
   }
 
   // --- architecture ---
@@ -236,19 +316,19 @@ class Builder {
       g.add(mesh); this.solids.push(mesh);
       return mesh;
     };
-    const body = add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMat(wall)));
+    const body = add(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), toonMatC(wall)));
     body.position.y = h / 2;
     // pyramid roof with a little overhang
     const roofGeo = new THREE.ConeGeometry(0.74, 1, 4);
     roofGeo.rotateY(Math.PI / 4);
-    const roofM = add(new THREE.Mesh(roofGeo, toonMat(roof)));
+    const roofM = add(new THREE.Mesh(roofGeo, toonMatC(roof)));
     roofM.scale.set(w * 1.08, h * 0.55, d * 1.08);
     roofM.position.y = h + h * 0.272;
-    const chim = add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.5), toonMat(wall)));
+    const chim = add(new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.2, 0.5), toonMatC(wall)));
     chim.position.set(w * 0.28, h + h * 0.4, -d * 0.18);
     // windows + door + awning
-    const winMat = toonMat('#9fb9cf');
-    const frameMat = toonMat('#f4ead2');
+    const winMat = toonMatC('#9fb9cf');
+    const frameMat = toonMatC('#f4ead2');
     const win = (wx, wy, wz, ww, wh, rot = 0) => {
       const f = new THREE.Mesh(new THREE.BoxGeometry(ww + 0.2, wh + 0.2, 0.12), frameMat);
       f.position.set(wx, wy, wz); f.rotation.y = rot; add(f);
@@ -259,9 +339,9 @@ class Builder {
     win(w * 0.26, h * 0.62, d / 2, 1.15, 0.85);
     win(-w / 2, h * 0.6, -d * 0.15, 1.05, 0.8, Math.PI / 2);
     win(w / 2, h * 0.6, d * 0.15, 1.05, 0.8, Math.PI / 2);
-    const door = add(new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.9, 0.16), toonMat('#8a6642')));
+    const door = add(new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.9, 0.16), toonMatC('#8a6642')));
     door.position.set(0, 0.95, d / 2);
-    const awn = add(new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.1, 1.1), toonMat(awning)));
+    const awn = add(new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.1, 1.1), toonMatC(awning)));
     awn.position.set(0, 2.2, d / 2 + 0.5);
     awn.rotation.x = 0.18;
     g.position.set(x, 0, z);
@@ -292,7 +372,7 @@ class Builder {
     } else this.box(x - w / 2, z, t, h, d, wall);
     const roofGeo = new THREE.ConeGeometry(0.74, 1, 4);
     roofGeo.rotateY(Math.PI / 4);
-    const roofM = new THREE.Mesh(roofGeo, toonMat(roof));
+    const roofM = new THREE.Mesh(roofGeo, toonMatC(roof));
     roofM.scale.set(w * 1.15, h * 0.5, d * 1.15);
     roofM.position.set(x, h + h * 0.25, z);
     this.place(roofM);
@@ -300,16 +380,16 @@ class Builder {
   cave(x, z, s = 1.4) {
     // rocky shelter with a dark inside, entrance on the +z side
     const rock = (rx, rz, rr) => {
-      const m = gradMesh(new THREE.DodecahedronGeometry(rr), '#6b6257', '#968b78', { camo: '#7a7060' });
+      const m = gradRock('#6b6257', '#968b78', rr);
       m.position.set(x + rx, rr * 0.7, z + rz);
       this.place(m);
     };
     rock(-2.2 * s, 0.3 * s, 1.6 * s);
     rock(2.2 * s, 0.3 * s, 1.6 * s);
     rock(0, -2.2 * s, 1.9 * s);
-    const top = gradMesh(new THREE.DodecahedronGeometry(2.6 * s), '#5f574d', '#8a8070', { camo: '#6b6257' });
+    const top = gradRock('#5f574d', '#8a8070', 1);
     top.position.set(x, 2.9 * s, z - 0.5 * s);
-    top.scale.set(1.25, 0.55, 1.15);
+    top.scale.set(3.25 * s, 1.43 * s, 2.99 * s);
     this.place(top);
     // three walls collide; the front stays open so you can slip in
     this.collideBox(x - 2.2 * s, z + 0.3 * s, 2.4 * s, 2.6 * s, 99);
@@ -318,22 +398,21 @@ class Builder {
   }
   bigTree(x, z, s = 1) {
     // jungle giant: flared roots, thick trunk, huge canopy
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.55 * s, 0.8 * s, 6.5 * s, 10), toonMat('#6e4f32'));
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.55 * s, 0.8 * s, 6.5 * s, 10), toonMatC('#6e4f32'));
     trunk.position.set(x, 3.25 * s, z);
     this.place(trunk);
     this.colliders.push({ minX: x - 0.8 * s, maxX: x + 0.8 * s, minZ: z - 0.8 * s, maxZ: z + 0.8 * s, top: 99 });
     for (let i = 0; i < 4; i++) {
       const a = (i / 4) * Math.PI * 2 + 0.4;
-      const root = new THREE.Mesh(new THREE.CylinderGeometry(0.18 * s, 0.3 * s, 1.6 * s, 6), toonMat('#6e4f32'));
+      const root = new THREE.Mesh(new THREE.CylinderGeometry(0.18 * s, 0.3 * s, 1.6 * s, 6), toonMatC('#6e4f32'));
       root.position.set(x + Math.cos(a) * 0.85 * s, 0.5 * s, z + Math.sin(a) * 0.85 * s);
       root.rotation.z = Math.cos(a) * 0.5;
       root.rotation.x = -Math.sin(a) * 0.5;
       this.place(root);
     }
     for (const [bx, by, bz, br] of [[0, 7 * s, 0, 3.2 * s], [2 * s, 6 * s, 0.8 * s, 2.2 * s], [-1.8 * s, 6.3 * s, -0.9 * s, 2.4 * s]]) {
-      const blob = gradMesh(new THREE.SphereGeometry(br, 10, 8), '#3f6b35', '#7fae57', { camo: '#4a7040' });
+      const blob = gradBlob('#3f6b35', '#7fae57', br, 0.8);
       blob.position.set(x + bx, by, z + bz);
-      blob.scale.y = 0.8;
       this.place(blob);
       this.animated.push({ kind: 'sway', obj: blob, phase: x + by, amp: 0.015 });
     }
@@ -353,12 +432,12 @@ class Builder {
     this.box(x + w / 2, z, t, h1, d, wall);                      // east
     // decorative ground-floor windows on the north face
     for (const wx of [-2.6, 2.6]) {
-      const glass = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.1, 0.16), toonMat('#9fb9cf'));
+      const glass = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.1, 0.16), toonMatC('#9fb9cf'));
       glass.position.set(x + wx, 1.8, z - d / 2 - 0.05);
       this.place(glass);
     }
     // awning over the door
-    const awn = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 1.1), toonMat(awning));
+    const awn = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.1, 1.1), toonMatC(awning));
     awn.position.set(x, 2.45, z + d / 2 + 0.5);
     awn.rotation.x = 0.18;
     this.place(awn);
@@ -382,7 +461,7 @@ class Builder {
     // ---- roof ----
     const roofGeo = new THREE.ConeGeometry(0.74, 1, 4);
     roofGeo.rotateY(Math.PI / 4);
-    const roofM = new THREE.Mesh(roofGeo, toonMat(roof));
+    const roofM = new THREE.Mesh(roofGeo, toonMatC(roof));
     roofM.scale.set(w * 1.12, 2.0, d * 1.12);
     roofM.position.set(x, fl + 2.7 + 1.0, z);
     this.place(roofM);
@@ -401,7 +480,7 @@ class Builder {
     decor('lamp', -2.6, -2.6, fl + 0.3);
   }
   lamp(x, z, side = 1) {
-    const mat = toonMat('#5a6152');
+    const mat = toonMatC('#5a6152');
     const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, 4.4, 8), mat);
     pole.position.set(x, 2.2, z);
     this.place(pole);
@@ -415,7 +494,7 @@ class Builder {
   }
   hill(x, z, r, color) {
     // rolling hills outside the walls, for the horizon
-    const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10), toonMat(color));
+    const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 10), toonMatC(color));
     m.position.set(x, -r * 0.62, z);
     m.scale.y = 0.6;
     m.castShadow = false;
@@ -424,7 +503,7 @@ class Builder {
   }
   flat(x, z, w, d, color, y = 0.02) {
     // road / path pieces: flat, no collision
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), toonMat(color));
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), toonMatC(color));
     m.rotation.x = -Math.PI / 2;
     m.position.set(x, y, z);
     m.receiveShadow = true;
@@ -507,6 +586,7 @@ function ringSpawns(cx, cz, r, n = 12) {
 }
 
 function finish(builder, spawn, spawns = null) {
+  builder.buildDecor(); // bake deferred grass/flowers into instanced meshes
   return {
     solids: builder.solids,
     colliders: builder.colliders,
@@ -514,6 +594,8 @@ function finish(builder, spawn, spawns = null) {
     hiderSpawns: spawns || ringSpawns(0, 0, builder.bounds * 0.55),
     bounds: builder.bounds,
     animate: builder.makeAnimate(),
+    sun: builder.sun,
+    sunOffset: builder.sunOffset,
   };
 }
 
@@ -537,7 +619,7 @@ export function buildMap(id, scene, seed = null) {
 
 // ---------- 🌴 Jungle ----------
 function buildJungle(scene) {
-  const bounds = 64;
+  const bounds = 128;
   const b = new Builder(scene, bounds);
   b.sky('#8fc3e0', '#d9e8b8');
   b.lights({ sunColor: '#ffedb8', sunI: 2.4, sky: '#e8f3d0', ground: '#41603f', ambI: 1.35 });
@@ -548,16 +630,16 @@ function buildJungle(scene) {
   const giants = [[-20, -16, 1.1], [16, -24, 1.3], [28, 12, 1], [-8, 22, 1.2], [-34, 6, 1], [8, 40, 1.1], [-28, -38, 1.2], [40, -10, 1.1], [-44, 28, 1], [22, -46, 1], [44, 34, 1.2], [-14, -2, 0.9]];
   giants.forEach(([x, z, s]) => b.bigTree(x, z, s));
   b.bigTree(-48, -12, 1); b.bigTree(50, 18, 1.1); b.bigTree(-6, -50, 1.2); b.bigTree(34, 48, 1);
-  b.sprinkle(22, (x, z) => b.tree(x, z, 0.9 + rng() * 0.5, '#4a7040', '#8fb85f'), 12);
+  b.sprinkle(60, (x, z) => b.tree(x, z, 0.9 + rng() * 0.5, '#4a7040', '#8fb85f'), 12);
   // caves to hide inside!
   b.cave(-30, -26, 1.4);
   b.cave(26, 28, 1.5);
   b.cave(38, -34, 1.3);
   b.cave(-44, 36, 1.4);
   // ferns, fallen logs, mossy rocks, mushrooms
-  b.sprinkle(88, (x, z) => b.tuft(x, z, 1.7, '#3f6b35', '#87b45f'));
+  b.sprinkle(400, (x, z) => b.tuft(x, z, 1.7, '#3f6b35', '#87b45f'));
   for (const [x, z, rot] of [[-6, -20, 0.5], [18, 4, 1.4], [-22, 18, 2.0], [34, 22, 0.8], [-38, -12, 1.7], [4, -38, 0.3]]) {
-    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.7, 5.5, 9), toonMat('#5f4426'));
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.7, 5.5, 9), toonMatC('#5f4426'));
     log.rotation.z = Math.PI / 2;
     log.rotation.y = rot;
     log.position.set(x, 0.65, z);
@@ -565,34 +647,59 @@ function buildJungle(scene) {
     b.colliders.push({ minX: x - 2.2, maxX: x + 2.2, minZ: z - 2.2, maxZ: z + 2.2, top: 1.3 });
   }
   for (const [x, z, s] of [[10, 14, 1.4], [-16, 34, 1.2], [32, -18, 1.5], [-42, -30, 1.3], [46, 8, 1.2], [-4, 48, 1.4]]) {
-    const rock = gradMesh(new THREE.DodecahedronGeometry(1.1 * s), '#6b6257', '#968b78', { camo: '#7a7060' });
+    const rock = gradRock('#6b6257', '#968b78', 1.1 * s);
     rock.position.set(x, 0.8 * s, z);
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
-  b.sprinkle(9, (x, z) => {
-    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.3), toonMat('#e8dcc0'));
+  b.sprinkle(18, (x, z) => {
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.3), toonMatC('#e8dcc0'));
     stem.position.set(x, 0.15, z);
     b.place(stem, { solid: false, cast: false });
-    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.22, 9, 7), toonMat('#c9564a'));
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.22, 9, 7), toonMatC('#c9564a'));
     cap.scale.y = 0.6;
     cap.position.set(x, 0.34, z);
     b.place(cap, { solid: false });
   });
-  b.sprinkle(20, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
+  b.sprinkle(70, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
+  // --- outskirts: the deep jungle ---
+  for (let i = 0; i < 22; i++) {
+    const a = rng() * Math.PI * 2, r = 60 + rng() * 58;
+    b.bigTree(Math.cos(a) * r, Math.sin(a) * r, 0.9 + rng() * 0.5);
+  }
+  b.cave(-84, -60, 1.5); b.cave(70, 84, 1.4); b.cave(98, -30, 1.3);
+  for (let i = 0; i < 8; i++) {
+    const a = rng() * Math.PI * 2, r = 62 + rng() * 55;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.7, 5.5, 9), toonMatC('#5f4426'));
+    log.rotation.z = Math.PI / 2;
+    log.rotation.y = rng() * 3;
+    log.position.set(x, 0.65, z);
+    b.place(log);
+    b.colliders.push({ minX: x - 2.2, maxX: x + 2.2, minZ: z - 2.2, maxZ: z + 2.2, top: 1.3, base: 0 });
+  }
+  for (let i = 0; i < 10; i++) {
+    const a = rng() * Math.PI * 2, r = 62 + rng() * 55, s = 1 + rng();
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const rock = gradRock('#6b6257', '#968b78', 1.1 * s);
+    rock.position.set(x, 0.8 * s, z);
+    b.place(rock);
+    b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s, base: 0 });
+  }
   b.hill(bounds + 22, 0, 34, '#54774a'); b.hill(-bounds - 20, -20, 30, '#4c6f44'); b.hill(6, bounds + 24, 32, '#5b7f50');
   b.cloud(-30, 56, 20, 1.2); b.cloud(35, 62, -30, 1.4); b.cloud(0, 58, 55, 1);
   b.butterfly(-10, 6, '#eab54e'); b.butterfly(14, -12); b.butterfly(-24, 26, '#f2f0e4'); b.butterfly(30, 34, '#c9a3e0'); b.butterfly(0, -34, '#f2b6c9'); b.butterfly(-38, -18, '#eab54e');
   const spawns = [
-    [0, 0, -30], [0, 0, 30], [-26, 0, 8], [26, 0, -6], [-12, 0, -30], [14, 0, 30],
-    [-36, 0, -8], [36, 0, 6], [-20, 0, 34], [20, 0, -32], [-40, 0, 20], [44, 0, -22],
+    [0, 0, -60], [0, 0, 60], [-52, 0, 16], [52, 0, -12], [-24, 0, -60], [28, 0, 60],
+    [-72, 0, -16], [72, 0, 12], [-40, 0, 68], [40, 0, -64], [-80, 0, 40], [88, 0, -44],
+    [-100, 0, -20], [100, 0, 30], [20, 0, -100], [-30, 0, 100],
   ];
   return finish(b, [0, 0, 0], spawns);
 }
 
 // ---------- 🏘️ Summer Village ----------
 function buildVillage(scene) {
-  const bounds = 60;
+  const bounds = 120;
   const b = new Builder(scene, bounds);
   b.sky('#7ec3ec', '#fdeec6');
   b.lights({});
@@ -606,10 +713,10 @@ function buildVillage(scene) {
   b.flat(-5.6, 0, 1.6, bounds * 2, '#dccfa8', 0.015);
   b.flat(5.6, 0, 1.6, bounds * 2, '#dccfa8', 0.015);
   for (let z = -bounds + 6; z < bounds - 4; z += 6) {
-    if (Math.abs(z - 10) < 4 || Math.abs(z + 30) < 4) continue; // keep crosswalks clear
+    if (Math.abs(z - 10) < 4 || Math.abs(z + 30) < 4 || Math.abs(z - 70) < 4 || Math.abs(z + 80) < 4) continue; // keep crosswalks clear
     b.flat(0, z, 0.35, 2.4, '#f2ecd7', 0.03);
   }
-  for (const cz of [10, -30]) {
+  for (const cz of [10, -30, 70, -80]) {
     for (let x = -3.3; x <= 3.3; x += 1.1) b.flat(x, cz, 0.75, 3.4, '#f2ecd7', 0.03);
   }
 
@@ -618,23 +725,35 @@ function buildVillage(scene) {
   const R = [[12.5, -32, 1], [13, -14, 4], [12.5, 6, 0], [13, 24, 2], [12.5, 42, 1]];
   for (const [x, z, s] of L) b.house(x, z, Math.PI / 2, { ...HOUSE_STYLES[s], w: 6.5 + (s % 3), d: 5.5 + ((s + 1) % 2) });
   for (const [x, z, s] of R) b.house(x, z, -Math.PI / 2, { ...HOUSE_STYLES[s], w: 6.5 + ((s + 1) % 3), d: 5.5 + (s % 2) });
-  // two big walk-in houses with stairs and an upstairs to hide in
+  // outskirt homes further along the (now much longer) road
+  for (const [z, side, s] of [[-100, 1, 0], [-84, -1, 3], [-64, 1, 2], [58, -1, 4], [76, 1, 1], [96, -1, 0]]) {
+    b.house(side * (12 + (s % 2) * 1.5), z, side > 0 ? -Math.PI / 2 : Math.PI / 2, { ...HOUSE_STYLES[s], w: 6.5 + (s % 3), d: 5.5 + (s % 2) });
+  }
+  // four big walk-in houses with stairs and an upstairs to hide in
   b.bigHouse(-24, -44, HOUSE_STYLES[1]);
   b.bigHouse(24, 44, HOUSE_STYLES[2]);
+  b.bigHouse(-30, -84, HOUSE_STYLES[3]);
+  b.bigHouse(30, 88, HOUSE_STYLES[4]);
   const nearBigHouse = (px, pz) =>
-    (Math.abs(px + 24) < 7 && Math.abs(pz + 44) < 6) || (Math.abs(px - 24) < 7 && Math.abs(pz - 44) < 6);
+    (Math.abs(px + 24) < 7 && Math.abs(pz + 44) < 6) || (Math.abs(px - 24) < 7 && Math.abs(pz - 44) < 6) ||
+    (Math.abs(px + 30) < 7 && Math.abs(pz + 84) < 6) || (Math.abs(px - 30) < 7 && Math.abs(pz - 88) < 6);
 
   // street lamps
-  for (let i = 0; i < 7; i++) {
-    const z = -48 + i * 16;
+  for (let i = 0; i < 14; i++) {
+    const z = -104 + i * 16;
     const side = i % 2 ? 1 : -1;
     b.lamp(side * 4.8, z, -side);
   }
 
   // palms + trees + garden bits
   for (const [x, z, s] of [[-7, -46, 1.1], [7.5, -8, 1], [-7, 26, 1.25], [8, 36, 0.95], [19, -24, 1.15], [-19, 8, 1.05], [-24, 42, 1.2], [26, 16, 1]]) b.palm(x, z, s);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 9 && !nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
-  b.sprinkle(30, (x, z) => { if (Math.abs(x) > 8 && !nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 14);
+  b.sprinkle(80, (x, z) => { if (Math.abs(x) > 9 && !nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
+  b.sprinkle(80, (x, z) => { if (Math.abs(x) > 8 && !nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 14);
+  for (let i = 0; i < 12; i++) { // palms sprinkled through the outskirts
+    const a = rng() * Math.PI * 2, r = 55 + rng() * 55;
+    const px = Math.cos(a) * r, pz = Math.sin(a) * r;
+    if (Math.abs(px) > 9 && !nearBigHouse(px, pz)) b.palm(px, pz, 0.9 + rng() * 0.4);
+  }
   // hedges + garden furniture + rocks
   b.box(-20, -12, 7, 1.6, 1, '#7fa05a');
   b.box(22, -2, 1, 1.6, 7, '#7fa05a');
@@ -647,13 +766,13 @@ function buildVillage(scene) {
   b.box(34, -44, 2, 2, 2, '#c99a63'); b.box(34, -42, 2, 2, 2, '#a97c47');
   b.cylinder(-40, -6, 0.7, 1.6, '#6f93b3'); b.cylinder(-38.6, -6.6, 0.7, 1.6, '#eab54e');
   for (const [x, z, s] of [[24, 30, 1.3], [-26, -30, 1.5], [30, -14, 1.1], [-38, 30, 1.4], [42, 22, 1.2], [8, -46, 1.3]]) {
-    const rock = gradMesh(new THREE.DodecahedronGeometry(1.1 * s), '#9a8f7c', '#c4baa4', { camo: '#a89d88' });
+    const rock = gradRock('#9a8f7c', '#c4baa4', 1.1 * s);
     rock.position.set(x, 0.8 * s, z);
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
-  b.sprinkle(48, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]); }, 8);
-  b.sprinkle(72, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.tuft(x, z, 0.9); }, 8);
+  b.sprinkle(150, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]); }, 8);
+  b.sprinkle(420, (x, z) => { if (Math.abs(x) > 7 && !nearBigHouse(x, z)) b.tuft(x, z, 0.9); }, 8);
   // garden huts you can hide inside
   b.hut(-20, 28, { door: 'E' });
   b.hut(20, -8, { door: 'W', wall: '#d9c2cf', roof: '#a86a6a' });
@@ -671,15 +790,16 @@ function buildVillage(scene) {
 
   // hand-picked spawns that never land inside a house
   const spawns = [
-    [0, 0, -34], [0, 0, 34], [-22, 0, -18], [22, 0, 18], [-20, 0, 20], [20, 0, -20],
-    [-30, 0, 0], [30, 0, 4], [0, 0, -50], [4, 0, 50], [-24, 0, 36], [26, 0, -36],
+    [0, 0, -68], [0, 0, 68], [-44, 0, -36], [44, 0, 36], [-40, 0, 40], [40, 0, -40],
+    [-60, 0, 0], [60, 0, 8], [0, 0, -100], [8, 0, 100], [-48, 0, 72], [52, 0, -72],
+    [-90, 0, 30], [90, 0, -30], [-70, 0, -70], [70, 0, 70],
   ];
   return finish(b, [0, 0, 10], spawns);
 }
 
 // ---------- 🏡 Sunny Garden ----------
 function buildGarden(scene) {
-  const bounds = 44;
+  const bounds = 88;
   const b = new Builder(scene, bounds);
   b.sky('#8fc3ea', '#ffe9b8');
   b.lights({});
@@ -687,7 +807,9 @@ function buildGarden(scene) {
   b.fence(2, '#e0bd8a');
   // the family house in one corner (two floors — go inside!) + garden shed
   b.bigHouse(-32, -32, HOUSE_STYLES[0]);
-  const nearBigHouse = (px, pz) => Math.abs(px + 32) < 7 && Math.abs(pz + 32) < 6;
+  b.bigHouse(58, 52, HOUSE_STYLES[3]);
+  const nearBigHouse = (px, pz) =>
+    (Math.abs(px + 32) < 7 && Math.abs(pz + 32) < 6) || (Math.abs(px - 58) < 7 && Math.abs(pz - 52) < 6);
   b.box(-14, -14, 5, 3, 0.3, '#efe3c2');
   b.box(-16.4, -12, 0.3, 3, 4.3, '#efe3c2');
   b.box(-11.6, -12, 0.3, 3, 4.3, '#efe3c2');
@@ -695,11 +817,26 @@ function buildGarden(scene) {
   b.box(-14, -12, 5.4, 0.35, 4.8, '#cf7351', { y: 3 });
   // trees, palms + bushes
   b.tree(12, -12, 1.2); b.tree(16, 8, 1); b.tree(-8, 14, 1.1);
-  b.sprinkle(20, (x, z) => { if (!nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
+  b.sprinkle(55, (x, z) => { if (!nearBigHouse(x, z)) b.tree(x, z, 0.9 + rng() * 0.5); }, 18);
+  // outskirts: orchard rows, spare huts, a far corner to explore
+  for (let rx = -70; rx <= 70; rx += 20) {
+    if (rx > -12 && rx < 12) continue;
+    b.tree(rx, -62 + rng() * 4, 1 + rng() * 0.3);
+    b.tree(rx + 8, -72 + rng() * 4, 0.9 + rng() * 0.3);
+    b.tree(rx - 6, 62 + rng() * 4, 1 + rng() * 0.3);
+    b.tree(rx + 10, 72 + rng() * 4, 0.9 + rng() * 0.3);
+  }
+  b.hut(-60, 20, { door: 'E' });
+  b.hut(56, -44, { door: 'N', wall: '#d9c2cf', roof: '#a86a6a' });
+  b.palm(-52, -58, 1.2); b.palm(70, 10, 1.1); b.palm(-70, 60, 1);
+  b.box(-48, 48, 10, 1.8, 1, '#7fa05a');
+  b.box(44, -20, 1, 1.8, 10, '#7fa05a');
+  b.box(-64, -24, 2, 2, 2, '#c99a63'); b.box(-62, -24, 2, 2, 2, '#a97c47');
+  b.cylinder(66, -66, 0.7, 1.6, '#6f93b3'); b.cylinder(64.6, -66.6, 0.7, 1.6, '#eab54e');
   b.palm(30, -26, 1.1); b.palm(-28, 24, 1.2); b.palm(36, 30, 1); b.palm(-36, -20, 1.15);
   b.bush(6, -6); b.bush(8, -4.5, 1.2); b.bush(-4, -16, 1.1); b.bush(18, -2, 1.3);
   b.bush(-18, 6, 1.2); b.bush(2, 16, 1); b.bush(4, 17.5, 1.2, '#5d7c40', '#94b25e');
-  b.sprinkle(22, (x, z) => { if (!nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 18);
+  b.sprinkle(55, (x, z) => { if (!nearBigHouse(x, z)) b.bush(x, z, 0.9 + rng() * 0.5); }, 18);
   // bigger hedge maze
   b.box(10, 14, 8, 1.8, 1, '#7fa05a');
   b.box(13.5, 10.5, 1, 1.8, 8, '#7fa05a');
@@ -717,12 +854,12 @@ function buildGarden(scene) {
   b.cylinder(0, -14, 2.2, 0.9, '#5ba393');
   b.box(-26, 10, 2, 2, 2, '#c99a63'); b.box(-24, 10, 2, 2, 2, '#a97c47');
   for (const [sx, sz] of [[-6, -8], [-8, -9.5], [-10.5, -10]]) {
-    const stone = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.08, 9), toonMat('#cfc3a2'));
+    const stone = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.08, 9), toonMatC('#cfc3a2'));
     stone.position.set(sx, 0.04, sz);
     b.place(stone, { cast: false });
   }
-  b.sprinkle(46, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
-  b.sprinkle(68, (x, z) => b.tuft(x, z, 0.9));
+  b.sprinkle(120, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
+  b.sprinkle(340, (x, z) => b.tuft(x, z, 0.9));
   b.hut(20, -30, { door: 'N', wall: '#e6d1a8', roof: '#8aa864' });
   b.hut(-34, 34, { door: 'E', wall: '#d9c2cf', roof: '#a86a6a' });
   b.box(28, 14, 8, 1.8, 1, '#7fa05a');
@@ -735,7 +872,7 @@ function buildGarden(scene) {
 
 // ---------- 📦 Crate Yard ----------
 function buildCrateYard(scene) {
-  const bounds = 52;
+  const bounds = 104;
   const b = new Builder(scene, bounds);
   b.sky('#a7cbe0', '#ffe6b8');
   b.lights({ sunPos: [30, 34, 20], sunColor: '#ffd9a0', ground: '#b3a071' });
@@ -743,7 +880,9 @@ function buildCrateYard(scene) {
   b.fence(5, '#e6d5ae');
   const crate = '#c99a63', crate2 = '#a97c47';
   // crate stack clusters (climbable!)
-  const clusters = [[-14, -12], [9, -15], [15, 7], [-5, 14], [-30, 8], [28, -24], [-24, -32], [34, 20], [-36, 28], [20, 36], [-12, 38], [38, -6], [-42, -10], [44, 34], [-8, -42], [42, -38], [-44, 42], [6, 44], [24, -42], [-40, 16]];
+  const core = [[-14, -12], [9, -15], [15, 7], [-5, 14], [-30, 8], [28, -24], [-24, -32], [34, 20], [-36, 28], [20, 36], [-12, 38], [38, -6], [-42, -10], [44, 34], [-8, -42], [42, -38], [-44, 42], [6, 44], [24, -42], [-40, 16]];
+  // outskirt clusters: the same layout stamped again at nearly double the radius
+  const clusters = [...core, ...core.slice(0, 16).map(([cx, cz]) => [Math.round(cx * 1.95), Math.round(cz * 1.95)])];
   clusters.forEach(([cx, cz], i) => {
     b.box(cx - 1, cz, 2, 2, 2, crate);
     b.box(cx + 1, cz, 2, 2, 2, i % 2 ? crate2 : crate);
@@ -751,13 +890,13 @@ function buildCrateYard(scene) {
     if (i % 3 === 0) b.box(cx, cz + 2.1, 2, 2, 2, crate2);
   });
   // shelving rows with crawl gaps
-  for (const [sx, sz] of [[-16, 4], [0, -4], [12, -4], [-28, -18], [24, 12], [4, 28], [-8, -34], [32, -34], [-38, -34], [40, 8], [-20, 40], [16, -28]]) {
+  for (const [sx, sz] of [[-16, 4], [0, -4], [12, -4], [-28, -18], [24, 12], [4, 28], [-8, -34], [32, -34], [-38, -34], [40, 8], [-20, 40], [16, -28], [-64, 30], [58, -52], [-74, -22], [66, 48], [-32, 74], [22, -76]]) {
     b.box(sx - 3.4, sz, 0.5, 2.2, 3, '#8a7048');
     b.box(sx + 3.4, sz, 0.5, 2.2, 3, '#8a7048');
     b.box(sx, sz, 7.6, 0.4, 3.2, '#a08454', { y: 2.2 });
   }
   // two shipping containers, open ends
-  for (const [ox, oz, col, col2] of [[4, 12, '#d07a5e', '#b3593f'], [-26, 24, '#7f9bb3', '#5f7b93']]) {
+  for (const [ox, oz, col, col2] of [[4, 12, '#d07a5e', '#b3593f'], [-26, 24, '#7f9bb3', '#5f7b93'], [-58, -60, '#8aa864', '#6d8148'], [64, 66, '#d07a5e', '#b3593f']]) {
     b.box(ox - 2, oz, 0.3, 3, 8, col);
     b.box(ox + 2, oz, 0.3, 3, 8, col);
     b.box(ox, oz + 4, 4.3, 3, 0.3, col);
@@ -765,8 +904,8 @@ function buildCrateYard(scene) {
   }
   // pastel barrels
   const barrelCols = ['#6f93b3', '#eab54e', '#8aa864', '#9c6b8f', '#d07a5e', '#5ba393'];
-  b.sprinkle(18, (x, z) => b.cylinder(x, z, 0.7, 1.6, barrelCols[Math.floor(rng() * 6)]), 10);
-  b.sprinkle(46, (x, z) => b.tuft(x, z, 0.9, '#a99a5c', '#d9cc84'));
+  b.sprinkle(30, (x, z) => b.cylinder(x, z, 0.7, 1.6, barrelCols[Math.floor(rng() * 6)]), 10);
+  b.sprinkle(240, (x, z) => b.tuft(x, z, 0.9, '#a99a5c', '#d9cc84'));
   b.palm(-42, -40, 1.2); b.palm(44, 40, 1.1);
   b.hill(bounds + 18, 10, 26, '#c4b083'); b.hill(-bounds - 16, -18, 24, '#b9a878');
   b.cloud(-30, 44, -20); b.cloud(20, 52, 30, 1.3); b.cloud(48, 48, -10, 0.9);
@@ -776,7 +915,7 @@ function buildCrateYard(scene) {
 
 // ---------- 🌾 Golden Meadow ----------
 function buildMeadow(scene) {
-  const bounds = 60;
+  const bounds = 120;
   const b = new Builder(scene, bounds);
   b.sky('#bcd6e8', '#ffdda0');
   b.lights({ sunPos: [34, 18, -12], sunColor: '#ffc98a', sky: '#ffe9c4', ground: '#8f9552', ambI: 1.4 });
@@ -784,9 +923,9 @@ function buildMeadow(scene) {
   b.fence(2.5, '#c9a06a');
   const spots = [[-18, -14], [-10, -20], [6, -18], [16, -10], [20, 4], [14, 16], [2, 20], [-12, 16], [-20, 6], [-6, -8], [8, 6], [-15, -3]];
   spots.forEach(([x, z], i) => b.tree(x, z, 0.9 + (i % 3) * 0.25, '#7c8b44', '#e3d878'));
-  b.sprinkle(32, (x, z) => b.tree(x, z, 0.85 + rng() * 0.6, '#7c8b44', '#e3d878'), 22);
+  b.sprinkle(95, (x, z) => b.tree(x, z, 0.85 + rng() * 0.6, '#7c8b44', '#e3d878'), 22);
   // tall golden grass to lie down in
-  for (const [gx, gz, gs] of [[-6, 10, 1.4], [10, -6, 1.2], [18, 12, 1], [-16, -18, 1.3], [30, -26, 1.5], [-34, 22, 1.4], [24, 34, 1.2], [-28, -36, 1.3]]) {
+  for (const [gx, gz, gs] of [[-6, 10, 1.4], [10, -6, 1.2], [18, 12, 1], [-16, -18, 1.3], [30, -26, 1.5], [-34, 22, 1.4], [24, 34, 1.2], [-28, -36, 1.3], [-62, 44, 1.6], [58, -50, 1.5], [-52, -66, 1.4], [70, 62, 1.6], [-84, 8, 1.3], [86, -14, 1.4], [12, -84, 1.5], [-20, 88, 1.4]]) {
     for (let i = 0; i < 10 * gs; i++) {
       const a = rng() * Math.PI * 2, r = rng() * 2 * gs;
       b.tuft(gx + Math.cos(a) * r, gz + Math.sin(a) * r, 1.5, '#a3a353', '#e8d98a');
@@ -794,14 +933,14 @@ function buildMeadow(scene) {
   }
   // warm rocks
   for (const [x, z, s] of [[4, -10, 1.4], [-10, 4, 1.1], [12, 10, 1.6], [-20, -8, 1.2], [34, 8, 1.7], [-38, -14, 1.4], [8, -38, 1.3], [-12, 40, 1.5]]) {
-    const rock = gradMesh(new THREE.DodecahedronGeometry(1.1 * s), '#9a8f7c', '#c4baa4', { camo: '#a89d88' });
+    const rock = gradRock('#9a8f7c', '#c4baa4', 1.1 * s);
     rock.position.set(x, 0.8 * s, z);
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
   // fallen logs
   for (const [x, z, rot] of [[-2, -16, 0.4], [16, -2, 1.2], [-14, 10, 2.2], [28, 20, 0.9], [-30, -26, 1.8], [36, -18, 0.2]]) {
-    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.65, 5, 9), toonMat('#8a6642'));
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.65, 5, 9), toonMatC('#8a6642'));
     log.rotation.z = Math.PI / 2;
     log.rotation.y = rot;
     log.position.set(x, 0.6, z);
@@ -809,19 +948,40 @@ function buildMeadow(scene) {
     b.colliders.push({ minX: x - 2, maxX: x + 2, minZ: z - 2, maxZ: z + 2, top: 1.2 });
   }
   // pond with lily pads
-  const pond = new THREE.Mesh(new THREE.CircleGeometry(4, 24), toonMat('#8fc2d8'));
+  const pond = new THREE.Mesh(new THREE.CircleGeometry(4, 24), toonMatC('#8fc2d8'));
   pond.rotation.x = -Math.PI / 2;
   pond.position.set(0, 0.02, -2);
   b.place(pond, { cast: false });
   for (const [px, pz] of [[-1.2, -2.5], [1.5, -1], [0.4, -3.4]]) {
-    const pad = new THREE.Mesh(new THREE.CircleGeometry(0.4, 10), toonMat('#7fa05a'));
+    const pad = new THREE.Mesh(new THREE.CircleGeometry(0.4, 10), toonMatC('#7fa05a'));
     pad.rotation.x = -Math.PI / 2;
     pad.position.set(px, 0.04, pz);
     scene.add(pad);
   }
-  b.sprinkle(30, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
-  b.sprinkle(36, (x, z) => b.tuft(x, z, 1, '#a3a353', '#ddd07e'));
+  b.sprinkle(90, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
+  b.sprinkle(200, (x, z) => b.tuft(x, z, 1, '#a3a353', '#ddd07e'));
   b.hut(-30, 8, { door: 'S', wall: '#c9b489', roof: '#8a7048' });
+  b.hut(66, -38, { door: 'W', wall: '#c9b489', roof: '#8a7048' });
+  b.hut(-72, 58, { door: 'E', wall: '#e6d1a8', roof: '#8aa864' });
+  // outskirt rocks and logs so the far meadow has cover too
+  for (let i = 0; i < 12; i++) {
+    const a = rng() * Math.PI * 2, r = 62 + rng() * 52, s = 1 + rng() * 0.8;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const rock = gradRock('#9a8f7c', '#c4baa4', 1.1 * s);
+    rock.position.set(x, 0.8 * s, z);
+    b.place(rock);
+    b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s, base: 0 });
+  }
+  for (let i = 0; i < 8; i++) {
+    const a = rng() * Math.PI * 2, r = 62 + rng() * 50;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.65, 5, 9), toonMatC('#8a6642'));
+    log.rotation.z = Math.PI / 2;
+    log.rotation.y = rng() * 3;
+    log.position.set(x, 0.6, z);
+    b.place(log);
+    b.colliders.push({ minX: x - 2, maxX: x + 2, minZ: z - 2, maxZ: z + 2, top: 1.2, base: 0 });
+  }
   b.hill(bounds + 20, 14, 30, '#a8a460'); b.hill(-bounds - 22, -10, 34, '#9c9a58'); b.hill(-10, bounds + 22, 28, '#b0ae66');
   b.cloud(-35, 42, 15, 1.2); b.cloud(25, 54, -25); b.cloud(50, 46, 20, 0.8); b.cloud(-55, 50, -35, 1.1);
   b.butterfly(-6, 10); b.butterfly(10, -6, '#eab54e'); b.butterfly(0, 14, '#f2f0e4'); b.butterfly(-14, -10, '#c9a3e0'); b.butterfly(26, -22, '#f2b6c9');

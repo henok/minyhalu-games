@@ -54,6 +54,12 @@ const HS = {
   setYaw: (v) => { heading = v; camYaw = v; avatarYaw = v; }, getYaw: () => heading, setPitch: (v) => { pitch = v; },
   state: () => ({ phase, hasWorld: !!world, hasAvatar: !!myAvatar, role: me.role, pose: me.pose, caught: me.caught }),
   pv: () => pvAvatar,
+  perf: () => ({
+    calls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+    geometries: renderer.info.memory.geometries,
+    textures: renderer.info.memory.textures,
+  }),
 };
 window.hs = HS;
 
@@ -66,7 +72,7 @@ renderer.toneMappingExposure = 1.35;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 let scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 300);
+const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 500);
 const clock = new THREE.Clock();
 const raycaster = new THREE.Raycaster();
 
@@ -748,6 +754,7 @@ function startRound(ends, ammoList = []) {
   const myHiderIdx = Math.max(0, hiders.findIndex(p => p.id === myId));
   const spawn = iAmSeeker ? world.seekerSpawn : world.hiderSpawns[myHiderIdx % world.hiderSpawns.length];
   me.pos.set(spawn[0], 0, spawn[2]);
+  for (let i = 0; i < 14 && blockedAt(me.pos.x, me.pos.z, 0); i++) me.pos.x += 2.3; // nudge out of any obstacle
   me.vel.set(0, 0, 0);
   heading = camYaw = avatarYaw = Math.atan2(-me.pos.x, -me.pos.z); // face the middle
   camInit = false;
@@ -1406,6 +1413,10 @@ function tick(dt) {
     updateLocal(dt);
     updateRemotes(dt);
     world.animate(performance.now() / 1000, dt);  // grass sways, clouds drift, butterflies flap
+    if (world.sun) { // the shadow box follows the player across the huge map
+      world.sun.position.copy(me.pos).add(world.sunOffset);
+      world.sun.target.position.copy(me.pos);
+    }
     for (const b of ammoMeshes) { // ammo boxes bob and spin so they catch the eye
       b.g.position.y = 0.5 + Math.sin(performance.now() / 400 + b.id) * 0.12;
       b.g.rotation.y += dt * 1.5;
