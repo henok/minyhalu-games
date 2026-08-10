@@ -73,7 +73,12 @@ const server = http.createServer((req, res) => {
 
   fs.readFile(filePath, (err, data) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream' });
+    // no-cache: browsers heuristically cache responses without cache headers,
+    // which serves stale JS modules after an update
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(filePath)] || 'application/octet-stream',
+      'Cache-Control': 'no-cache',
+    });
     res.end(data);
   });
 });

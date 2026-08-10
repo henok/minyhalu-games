@@ -51,6 +51,7 @@ const keys = {};
 // debug handle (also used by automated tests)
 const HS = {
   me, keys, debugFree: false, tick: null,
+  world: () => world, remotes: () => remotes, avatar: () => myAvatar,
   setYaw: (v) => { heading = v; camYaw = v; avatarYaw = v; }, getYaw: () => heading, setPitch: (v) => { pitch = v; },
   state: () => ({ phase, hasWorld: !!world, hasAvatar: !!myAvatar, role: me.role, pose: me.pose, caught: me.caught }),
   pv: () => pvAvatar,
@@ -748,6 +749,7 @@ function startRound(ends, ammoList = []) {
 
   // my avatar + spawn
   myAvatar = buildAvatar(me.cfg);
+  myAvatar.setGroundSampler((x, z, feetY) => (world ? groundHeightAt(x, z, feetY) : 0));
   scene.add(myAvatar.group);
   const iAmSeeker = me.role === 'seeker';
   const hiders = roomPlayers.filter(p => p.role === 'hider');
@@ -797,6 +799,7 @@ function syncRemotePlayers() {
       continue;
     }
     const avatar = buildAvatar(p.avatar || {});
+    avatar.setGroundSampler((x, z, feetY) => (world ? groundHeightAt(x, z, feetY) : 0));
     let tag = null;
     if (p.role === 'seeker') {          // hiders never show a name tag
       tag = makeNameTag(p.name, '#ffd9c4');
@@ -1135,7 +1138,12 @@ function shoot() {
   }
   const from = myAvatar.group.position.clone().add(new THREE.Vector3(0, myAvatar.headY, 0));
   net.send({ t: 'shoot', hit: hitId, from: from.toArray(), to: hitPoint.toArray() });
+  // the shooter's hand snaps into a point for a beat
+  myAvatar.setHandPose('point');
+  clearTimeout(shootPoseTimer);
+  shootPoseTimer = setTimeout(() => myAvatar && myAvatar.setHandPose(null), 900);
 }
+let shootPoseTimer = null;
 
 const tracers = [];
 function drawTracer(from, to) {
@@ -1389,6 +1397,28 @@ setInterval(() => {
   for (const [id, r] of remotes) {
     const d = Math.min(r.avatar.group.position.distanceTo(me.pos), nearestTo(r.avatar.group.position, id));
     r.avatar.setExpression(exprFor(d));
+  }
+
+  // heads turn toward whoever is closest (within earshot) — same cadence
+  // as expressions; the avatar eases the motion between updates
+  const LOOK_RANGE = 12;
+  const headPosOf = (a) => a.group.position.clone().add(new THREE.Vector3(0, a.headY, 0));
+  let best = null, bestD = LOOK_RANGE;
+  for (const [, r] of remotes) {
+    const d = me.pos.distanceTo(r.avatar.group.position);
+    if (d < bestD) { bestD = d; best = r; }
+  }
+  myAvatar.setLookTarget(best ? headPosOf(best.avatar) : null);
+  for (const [id, r] of remotes) {
+    let target = null, td = LOOK_RANGE;
+    const dMe = r.avatar.group.position.distanceTo(me.pos);
+    if (dMe < td) { td = dMe; target = headPosOf(myAvatar); }
+    for (const [id2, r2] of remotes) {
+      if (id2 === id) continue;
+      const d2 = r.avatar.group.position.distanceTo(r2.avatar.group.position);
+      if (d2 < td) { td = d2; target = headPosOf(r2.avatar); }
+    }
+    r.avatar.setLookTarget(target);
   }
 }, 200);
 

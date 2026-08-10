@@ -9,6 +9,13 @@ import { toonMat } from './avatar.js';
 export const MODELS = {
   classic_boy: { name: '🧒 Classic Boy', classic: 'boy' },
   classic_girl: { name: '👧 Classic Girl', classic: 'girl' },
+  scout: {
+    name: '🏃 Scout', url: '/models/scout.glb', height: 1.75,
+    clips: {
+      idle: ['idle'], walk: ['walk'], run: ['run'], dance: ['dance'],
+      crouch: ['crouchidle', 'sneak_pose'], crouchwalk: ['crouchwalk'],
+    },
+  },
   robot: {
     name: '🤖 Robot', url: '/models/RobotExpressive.glb', height: 1.7,
     clips: { idle: ['Idle'], walk: ['Walking'], run: ['Running'], dance: ['Dance'], crouch: ['Sitting'] },

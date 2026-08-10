@@ -117,6 +117,71 @@ export function buildAvatar(cfg = {}) {
   return buildGlbAvatar(cfg, spec);
 }
 
+// scratch objects for the per-frame procedural layers (look-at, foot IK) —
+// shared across avatars; all usage is synchronous within one update call
+const _vA = new THREE.Vector3(), _vB = new THREE.Vector3(), _vC = new THREE.Vector3(), _vD = new THREE.Vector3();
+const _vT = new THREE.Vector3(); // reserved for IK targets — never touched by ccdTowards
+const _qA = new THREE.Quaternion(), _qB = new THREE.Quaternion(), _qC = new THREE.Quaternion(), _qD = new THREE.Quaternion();
+
+// rotate `bone` (in place) by the world-space rotation taking direction
+// `from` to direction `to` — no assumptions about the bone's local axes
+function rotBoneWorld(bone, from, to) {
+  _qA.setFromUnitVectors(from.normalize(), to.normalize());
+  bone.parent.getWorldQuaternion(_qB);
+  _qC.copy(_qB).invert().multiply(_qA).multiply(_qB);
+  bone.quaternion.premultiply(_qC);
+}
+
+// exact two-bone leg solve: aim hip at target, set the knee angle by the
+// law of cosines (bending in the leg's existing bend plane), re-aim hip.
+// CCD stalls here because a foot lift keeps the target nearly along the limb.
+function solveLeg(hip, knee, ankle, target) {
+  hip.updateWorldMatrix(true, false);
+  hip.getWorldPosition(_vA);
+  ankle.updateWorldMatrix(true, false);
+  ankle.getWorldPosition(_vB);
+  rotBoneWorld(hip, _vB.sub(_vA), _vC.copy(target).sub(_vA));
+
+  hip.updateWorldMatrix(true, false);
+  hip.getWorldPosition(_vA);
+  knee.updateWorldMatrix(true, false);
+  knee.getWorldPosition(_vB);
+  ankle.updateWorldMatrix(true, false);
+  ankle.getWorldPosition(_vC);
+  const L1 = _vB.distanceTo(_vA), L2 = _vC.distanceTo(_vB);
+  if (L1 < 1e-4 || L2 < 1e-4) return;
+  const d = Math.min(L1 + L2 - 0.005, Math.max(Math.abs(L1 - L2) + 0.005, target.distanceTo(_vA)));
+  const cosNew = (L1 * L1 + L2 * L2 - d * d) / (2 * L1 * L2);
+  _vC.sub(_vB);               // knee → ankle
+  _vD.copy(_vA).sub(_vB);     // knee → hip
+  const cosCur = _vC.dot(_vD) / (L1 * L2);
+  // +rotation about (KA×KH) closes the knee angle (verified empirically),
+  // so a smaller target angle needs delta = current − new
+  const delta = Math.acos(Math.min(1, Math.max(-1, cosCur))) - Math.acos(Math.min(1, Math.max(-1, cosNew)));
+  _vA.copy(_vC).cross(_vD).normalize();  // bend-plane normal (keeps knee direction)
+  if (_vA.lengthSq() < 0.5) return;      // dead-straight leg: skip this frame
+  const applyKnee = (ang) => {
+    _qA.setFromAxisAngle(_vA, ang);
+    knee.parent.getWorldQuaternion(_qB);
+    _qC.copy(_qB).invert().multiply(_qA).multiply(_qB);
+    knee.quaternion.premultiply(_qC);
+  };
+  const dCur = Math.sqrt(Math.max(0, L1 * L1 + L2 * L2 - 2 * L1 * L2 * cosCur));
+  applyKnee(delta);
+  // axis handedness is pose-dependent — if the reach moved away from d, flip
+  hip.updateWorldMatrix(true, false);
+  hip.getWorldPosition(_vB);
+  ankle.updateWorldMatrix(true, false);
+  ankle.getWorldPosition(_vC);
+  if (Math.abs(_vC.distanceTo(_vB) - d) > Math.abs(dCur - d)) applyKnee(-2 * delta);
+
+  hip.updateWorldMatrix(true, false);
+  hip.getWorldPosition(_vA);
+  ankle.updateWorldMatrix(true, false);
+  ankle.getWorldPosition(_vB);
+  rotBoneWorld(hip, _vB.sub(_vA), _vC.copy(target).sub(_vA));
+}
+
 // ================= GLB models =================
 const loader = new GLTFLoader();
 const gltfCache = new Map();
@@ -139,6 +204,26 @@ function buildGlbAvatar(cfg, spec) {
   let mats = [], matOriginals = [];
   let pose = 'stand', walkK = 0, ghillieG = null;
   let pendingPaint = undefined, pendingGhost = false;
+
+  // procedural layers (M3): head look-at + ground-adaptive feet
+  const hasRealCrouch = !!(spec.clips && spec.clips.crouchwalk);
+  let bones = null, modelRef = null, baseModelY = 0;
+  let lookHas = false, lookW = 0;
+  const lookPos = new THREE.Vector3(), lastLook = new THREE.Vector3();
+  let groundSampler = null, rootYOff = 0;
+
+  // life layers (M4): face morphs, blink, breath, finger curl
+  const EXPR = {
+    calm: {},
+    alert: { wide: 0.5, browsUp: 0.6, mouthO: 0.35 },
+    scared: { wide: 1, browsUp: 1, mouthO: 1 },
+  };
+  let morphMeshes = [];
+  let expression = 'calm';
+  const exprCur = { wide: 0, browsUp: 0, mouthO: 0 };
+  let blinkT = 1.5 + Math.random() * 3, blinkPhase = -1;
+  let breathT = Math.random() * 10;
+  let fingerBones = [], handCur = 0.25, handTarget = null, pointing = false;
 
   loadGLTF(spec.url).then((gltf) => {
     // measure the ORIGINAL scene: cloned skinned meshes report unreliable
@@ -166,6 +251,43 @@ function buildGlbAvatar(cfg, spec) {
       }
     });
     matOriginals = mats.map(m => (m.color ? m.color.clone() : null));
+    modelRef = model;
+    baseModelY = model.position.y;
+    // named bones for the procedural layers; suffix match survives the
+    // loader's name sanitizing ("mixamorig:Head" vs "mixamorigHead")
+    const findBone = (suffix) => {
+      let hit = null;
+      model.traverse(o => { if (!hit && o.isBone && o.name.endsWith(suffix)) hit = o; });
+      return hit;
+    };
+    bones = {
+      head: findBone('Head'), neck: findBone('Neck'), spine2: findBone('Spine2'),
+      upLegL: findBone('LeftUpLeg'), legL: findBone('LeftLeg'), footL: findBone('LeftFoot'),
+      upLegR: findBone('RightUpLeg'), legR: findBone('RightLeg'), footR: findBone('RightFoot'),
+    };
+    // meshes carrying the face morph targets (blink / wide / browsUp / mouthO)
+    model.traverse(o => { if (o.isMesh && o.morphTargetDictionary) morphMeshes.push(o); });
+    // finger bones with a per-bone local curl axis, computed once from the
+    // bind pose (palms face down in the T-pose, so curl = tips toward -Y)
+    const FING = /(Left|Right)Hand(Thumb|Index|Middle|Ring|Pinky)([123])$/;
+    model.updateMatrixWorld(true);
+    model.traverse(o => {
+      if (!o.isBone) return;
+      const m = o.name.match(FING);
+      if (!m) return;
+      const child = o.children.find(c => c.isBone);
+      if (!child) return;
+      const dir = child.getWorldPosition(new THREE.Vector3())
+        .sub(o.getWorldPosition(new THREE.Vector3())).normalize();
+      const axisWorld = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, -1, 0));
+      if (axisWorld.lengthSq() < 1e-6) return;
+      const wq = o.getWorldQuaternion(new THREE.Quaternion());
+      const axisLocal = axisWorld.normalize().applyQuaternion(wq.invert());
+      fingerBones.push({
+        bone: o, axis: axisLocal, finger: m[2],
+        factor: (m[2] === 'Thumb' ? 0.45 : 1) * (m[3] === '1' ? 0.8 : 1),
+      });
+    });
     mixer = new THREE.AnimationMixer(model);
     const clipFor = (names) => {
       for (const n of names || []) {
@@ -174,8 +296,10 @@ function buildGlbAvatar(cfg, spec) {
       }
       return gltf.animations[0] || null;
     };
-    for (const key of ['idle', 'walk', 'run', 'dance', 'crouch']) {
-      const clip = clipFor(spec.clips && spec.clips[key]);
+    for (const key of ['idle', 'walk', 'run', 'dance', 'crouch', 'crouchwalk']) {
+      const names = spec.clips && spec.clips[key];
+      if (key === 'crouchwalk' && !names) continue; // optional clip — no fallback
+      const clip = clipFor(names);
       if (clip) actions[key] = mixer.clipAction(clip);
     }
     play(pose === 'dance' ? 'dance' : pose === 'crouch' ? 'crouch' : 'idle', 0);
@@ -207,10 +331,12 @@ function buildGlbAvatar(cfg, spec) {
       poseG.scale.set(0.62, 0.45, 0.62);
       play('crouch');
     } else if (name === 'crouch') {
-      // squash + slight lean so EVERY model visibly crouches,
-      // plus the model's own crouch/sneak clip when it has one
-      poseG.scale.set(1, 0.62, 1);
-      poseG.rotation.x = 0.12;
+      // models with a real crouch-walk set (Scout) play honest clips;
+      // everyone else gets the squash + lean so they still visibly crouch
+      if (!hasRealCrouch) {
+        poseG.scale.set(1, 0.62, 1);
+        poseG.rotation.x = 0.12;
+      }
       play('crouch');
     } else if (name === 'dance') {
       play('dance');
@@ -224,8 +350,147 @@ function buildGlbAvatar(cfg, spec) {
   function update(dt) {
     if (!mixer) return;
     if (pose === 'stand') play(walkK > 0.55 ? 'run' : walkK > 0.06 ? 'walk' : 'idle');
+    else if (pose === 'crouch' && actions.crouchwalk) play(walkK > 0.06 ? 'crouchwalk' : 'crouch');
     mixer.update(dt);
+    applyFingers(dt);
+    applyBreath(dt);
+    applyFeet();
+    applyLookAt(dt);
+    applyFace(dt);
   }
+
+  // ---- L4: finger curl — relaxed / loose fist / point, eased ----
+  function applyFingers(dt) {
+    if (!fingerBones.length) return;
+    const auto = pose === 'crouch' ? 0.35 : walkK > 0.55 ? 0.6 : 0.25;
+    const goal = handTarget === null ? auto : handTarget;
+    handCur += (goal - handCur) * Math.min(1, dt * 6);
+    if (handCur < 0.01) return;
+    for (const f of fingerBones) {
+      const amt = handCur * f.factor * (pointing && f.finger === 'Index' ? 0.05 : 1);
+      _qA.setFromAxisAngle(f.axis, amt);
+      f.bone.quaternion.multiply(_qA);
+    }
+  }
+
+  // ---- idle breath: subtle chest sway, damped while moving ----
+  function applyBreath(dt) {
+    if (!bones || !bones.spine2) return;
+    breathT += dt;
+    const ang = Math.sin(breathT * 1.6) * 0.012 * (walkK < 0.06 ? 1 : 0.3);
+    const yawBody = group.rotation.y + (spec.rotY || 0);
+    _vD.set(Math.cos(yawBody), 0, -Math.sin(yawBody));  // body lateral axis
+    _qA.setFromAxisAngle(_vD, ang);
+    const b = bones.spine2;
+    b.updateWorldMatrix(true, false);
+    b.parent.getWorldQuaternion(_qB);
+    b.getWorldQuaternion(_qC);
+    _qC.premultiply(_qA);
+    b.quaternion.copy(_qB.invert().multiply(_qC));
+  }
+
+  // ---- L5: face — expression morphs eased, autonomous blinking ----
+  function applyFace(dt) {
+    if (!morphMeshes.length) return;
+    const tgt = EXPR[expression] || EXPR.calm;
+    const k = Math.min(1, dt * 8);
+    for (const key of ['wide', 'browsUp', 'mouthO']) {
+      exprCur[key] += ((tgt[key] || 0) - exprCur[key]) * k;
+    }
+    let blinkW = 0;
+    if (blinkPhase >= 0) {
+      blinkPhase += dt;
+      const t = blinkPhase / 0.22;
+      if (t >= 1) { blinkPhase = -1; blinkT = 2 + Math.random() * 4; }
+      else blinkW = Math.sin(t * Math.PI);
+    } else if ((blinkT -= dt) <= 0) {
+      blinkPhase = 0;
+    }
+    for (const mesh of morphMeshes) {
+      const d = mesh.morphTargetDictionary, inf = mesh.morphTargetInfluences;
+      if (d.blink !== undefined) inf[d.blink] = blinkW;
+      if (d.wide !== undefined) inf[d.wide] = exprCur.wide;
+      if (d.browsUp !== undefined) inf[d.browsUp] = exprCur.browsUp;
+      if (d.mouthO !== undefined) inf[d.mouthO] = exprCur.mouthO;
+    }
+  }
+
+  function setExpression(kind) {
+    expression = EXPR[kind] ? kind : 'calm';
+  }
+
+  function setHandPose(name) {
+    pointing = name === 'point';
+    handTarget = name === 'point' ? 1.15 : name === 'fist' ? 1.15
+      : name === 'relaxed' ? 0.25 : null;
+  }
+
+  // ---- L2: ground-adaptive feet — plant on stairs and slopes ----
+  function applyFeet() {
+    if (!groundSampler || !bones || !bones.footL || !bones.footR || !modelRef) return;
+    if (pose === 'flat' || pose === 'ball') return;
+    const baseY = group.position.y;
+    const feet = [
+      [bones.legL, bones.upLegL, bones.footL],
+      [bones.legR, bones.upLegR, bones.footR],
+    ];
+    const dys = feet.map(([, , foot]) => {
+      foot.updateWorldMatrix(true, false);
+      foot.getWorldPosition(_vA);
+      const dy = groundSampler(_vA.x, _vA.z, baseY) - baseY;
+      // big drops are ledges (upstairs floor edges) — leave the animation alone
+      return (dy < -0.35 || dy > 0.6) ? 0 : dy;
+    });
+    const drop = Math.min(dys[0], dys[1], 0);
+    rootYOff += (drop - rootYOff) * 0.25;            // ease the pelvis down
+    modelRef.position.y = baseModelY + rootYOff;
+    for (let i = 0; i < 2; i++) {
+      const lift = dys[i] - drop;
+      if (lift < 0.02) continue;                     // this foot already rests
+      const [leg, upLeg, foot] = feet[i];
+      foot.updateWorldMatrix(true, false);
+      foot.getWorldPosition(_vA);
+      solveLeg(upLeg, leg, foot, _vT.set(_vA.x, _vA.y + lift, _vA.z));
+    }
+  }
+
+  // ---- L3: head look-at — eased, clamped to a natural neck range ----
+  function applyLookAt(dt) {
+    if (!bones || !bones.head) return;
+    lookW += ((lookHas ? 1 : 0) - lookW) * Math.min(1, dt * 5);
+    if (lookW < 0.02) return;
+    if (lookHas) lastLook.copy(lookPos);
+    const yawBody = group.rotation.y + (spec.rotY || 0);
+    bones.head.updateWorldMatrix(true, false);
+    bones.head.getWorldPosition(_vA);
+    _vB.subVectors(lastLook, _vA);
+    const dist = Math.hypot(_vB.x, _vB.z);
+    if (dist < 0.3) return;
+    let dyaw = Math.atan2(_vB.x, _vB.z) - yawBody;
+    while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+    while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+    const yaw = yawBody + THREE.MathUtils.clamp(dyaw, -1.1, 1.1);
+    const pitch = THREE.MathUtils.clamp(Math.atan2(_vB.y, dist), -0.45, 0.45);
+    _vC.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    _vD.set(Math.sin(yawBody), 0, Math.cos(yawBody));
+    _qA.setFromUnitVectors(_vD, _vC); // world-space "turn face from forward to target"
+    for (const [bone, share] of [[bones.neck, 0.35], [bones.head, 0.65]]) {
+      if (!bone) continue;
+      _qB.identity().slerp(_qA, lookW * share);
+      bone.updateWorldMatrix(true, false);
+      bone.parent.getWorldQuaternion(_qC);
+      bone.getWorldQuaternion(_qD);
+      _qD.premultiply(_qB);
+      bone.quaternion.copy(_qC.invert().multiply(_qD));
+    }
+  }
+
+  function setLookTarget(v) {
+    lookHas = !!v;
+    if (v) lookPos.copy(v);
+  }
+
+  function setGroundSampler(fn) { groundSampler = fn; }
 
   function setPaint(color) {
     if (!mats.length) { pendingPaint = color; return; }
@@ -257,7 +522,11 @@ function buildGlbAvatar(cfg, spec) {
     });
   }
 
-  return { group, setPose, setWalk, update, setPaint, setGhillie, setBodyPaint, setGhost, setExpression: () => {}, standHeight, headY: standHeight * 0.85 };
+  return {
+    group, setPose, setWalk, update, setPaint, setGhillie, setBodyPaint, setGhost,
+    setExpression, setLookTarget, setGroundSampler, setHandPose,
+    standHeight, headY: standHeight * 0.85,
+  };
 }
 
 // ================= Classic procedural kids =================
@@ -569,6 +838,7 @@ function buildClassicAvatar(cfg, gender) {
 
   return {
     group, setPose, setWalk, update: () => {}, setPaint, setGhillie, setBodyPaint, setGhost, setExpression,
+    setLookTarget: () => {}, setGroundSampler: () => {}, setHandPose: () => {},
     standHeight, headY: legLen + headLocalY,
   };
 }
