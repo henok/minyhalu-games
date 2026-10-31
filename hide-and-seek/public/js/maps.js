@@ -9,7 +9,7 @@ import { makeProp } from './models.js';
 
 export const MAPS = {
   village: { name: '🏘️ Summer Village', desc: 'A sunny street with houses, palm trees and gardens' },
-  jungle: { name: '🌴 Jungle', desc: 'Giant trees, ferns and dark caves to hide inside' },
+  jungle: { name: '🌴 Jungle', desc: 'Vine-draped giants, palms, a smoking volcano, and dark caves' },
   backyard: { name: '🏡 Sunny Garden', desc: 'Bushes, a hedge maze and a cosy shed to sneak into' },
   warehouse: { name: '📦 Crate Yard', desc: 'Climb honey-wood crates, hide in the old containers' },
   forest: { name: '🌾 Golden Meadow', desc: 'Tall golden grass to lie down in, logs and warm rocks' },
@@ -85,6 +85,30 @@ function gradRock(lo, hi, s) {
   return m;
 }
 
+// a butterfly wing with gracefully curved, two-lobed edges — and gently
+// cupped in 3D like a real wing (shared by every butterfly on every map)
+let wingGeoCache = null;
+function butterflyWingGeo() {
+  if (wingGeoCache) return wingGeoCache;
+  const sh = new THREE.Shape();
+  sh.moveTo(0, 0.02);
+  sh.quadraticCurveTo(0.10, 0.17, 0.24, 0.14);    // forewing: sweeping leading edge
+  sh.quadraticCurveTo(0.33, 0.10, 0.26, 0.01);    // rounded outer tip
+  sh.quadraticCurveTo(0.21, -0.03, 0.12, -0.03);  // soft notch between the lobes
+  sh.quadraticCurveTo(0.20, -0.11, 0.12, -0.18);  // trailing hindwing lobe
+  sh.quadraticCurveTo(0.03, -0.20, 0.005, -0.06); // sweep back to the body
+  sh.lineTo(0, 0.02);
+  const g = new THREE.ShapeGeometry(sh, 12);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const wx = p.getX(i);
+    p.setZ(i, wx * wx * 0.5); // the cupping
+  }
+  g.computeVertexNormals();
+  wingGeoCache = g;
+  return g;
+}
+
 class Builder {
   constructor(scene, bounds) {
     this.scene = scene;
@@ -94,6 +118,7 @@ class Builder {
     this.animated = [];   // {kind, obj, ...} updated every frame
     this.tufts = [];      // deferred: baked into a few InstancedMeshes at the end
     this.flowers = [];
+    this.vines = [];      // deferred hanging vines (two draw calls total)
   }
   place(mesh, { solid = true, cast = true, receive = true } = {}) {
     mesh.castShadow = cast;
@@ -304,6 +329,32 @@ class Builder {
       heads.castShadow = false;
       this.scene.add(stems, heads);
     }
+    // --- hanging vines: every vine on the map in just two draw calls ---
+    if (this.vines.length) {
+      const vineGeo = new THREE.CylinderGeometry(0.022, 0.04, 1, 5);
+      vineGeo.translate(0, -0.5, 0); // hang from the origin downward
+      const vines = new THREE.InstancedMesh(vineGeo, toonMatC('#3d5a2f'), this.vines.length);
+      const leaves = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 7, 5), toonMatC('#4f7a3c'), this.vines.length * 2);
+      const qi = new THREE.Quaternion(); // vines hang plumb
+      let li = 0;
+      this.vines.forEach((v, i) => {
+        m4.compose(p3.set(v.x, v.topY, v.z), qi, s3.set(1, v.len, 1));
+        vines.setMatrixAt(i, m4);
+        for (const f of [0.55, 1]) { // a leaf cluster mid-way and at the tip
+          e.set((rng() - 0.5) * 0.9, rng() * Math.PI, (rng() - 0.5) * 0.9);
+          q.setFromEuler(e);
+          m4.compose(
+            p3.set(v.x + (rng() - 0.5) * 0.1, v.topY - v.len * f, v.z + (rng() - 0.5) * 0.1),
+            q,
+            s3.set(0.26, 0.09, 0.16)
+          );
+          leaves.setMatrixAt(li++, m4);
+        }
+      });
+      vines.castShadow = false;
+      leaves.castShadow = false;
+      this.scene.add(vines, leaves);
+    }
   }
 
   // --- architecture ---
@@ -416,6 +467,18 @@ class Builder {
       this.place(blob);
       this.animated.push({ kind: 'sway', obj: blob, phase: x + by, amp: 0.015 });
     }
+    // vines hanging from under the canopy
+    const nV = 2 + Math.floor(rng() * 3);
+    for (let v = 0; v < nV; v++) {
+      const a = rng() * Math.PI * 2;
+      const rr = (0.9 + rng() * 2.1) * s;
+      this.vines.push({
+        x: x + Math.cos(a) * rr,
+        z: z + Math.sin(a) * rr,
+        topY: (5.4 + rng() * 1.4) * s,
+        len: (2.2 + rng() * 2.6) * s,
+      });
+    }
   }
   bigHouse(x, z, style = {}) {
     // a real two-story house: walk in the door, climb the stairs, look out
@@ -525,21 +588,76 @@ class Builder {
     this.scene.add(g);
     this.animated.push({ kind: 'drift', obj: g, speed: 0.25 + rng() * 0.35, limit: this.bounds * 4 });
   }
-  butterfly(cx, cz, color = '#f2b6c9') {
+  butterfly(cx, cz, color = '#f2b6c9', s = 1, { baseY = 1.1, sp = null, flap = 14 } = {}) {
     const g = new THREE.Group();
     const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
-    const wingGeo = new THREE.PlaneGeometry(0.16, 0.22);
-    wingGeo.translate(0.09, 0, 0);
-    const wingR = new THREE.Mesh(wingGeo, mat);
-    const wingL = new THREE.Mesh(wingGeo.clone(), mat);
+    const wingR = new THREE.Mesh(butterflyWingGeo(), mat);
+    const wingL = new THREE.Mesh(butterflyWingGeo(), mat);
     wingL.scale.x = -1;
-    g.add(wingR, wingL);
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.016, 0.15, 2, 6), toonMatC('#3a3426'));
+    g.add(wingR, wingL, body);
+    g.scale.setScalar(s);
     g.rotation.x = -0.6;
     this.scene.add(g);
     this.animated.push({
-      kind: 'butterfly', obj: g, wingR, wingL,
-      cx, cz, r: 2.5 + rng() * 3, sp: 0.25 + rng() * 0.3, phase: rng() * 9,
+      kind: 'butterfly', obj: g, wingR, wingL, baseY, flap,
+      cx, cz, r: 2.5 + rng() * 3, sp: sp ?? (0.25 + rng() * 0.3), phase: rng() * 9,
     });
+  }
+  bug(cx, cz) {
+    // a busy little bee: quick, low, and blurry-winged
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.055, 7, 5), toonMatC('#d9a43b'));
+    body.scale.set(1, 0.8, 1.4);
+    const wingMat = new THREE.MeshBasicMaterial({ color: '#fffdf4', transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+    const wGeo = new THREE.CircleGeometry(0.05, 6);
+    wGeo.translate(0.05, 0.02, 0);
+    const wingR = new THREE.Mesh(wGeo, wingMat);
+    const wingL = new THREE.Mesh(wGeo.clone(), wingMat);
+    wingL.scale.x = -1;
+    g.add(body, wingR, wingL);
+    this.scene.add(g);
+    this.animated.push({
+      kind: 'butterfly', obj: g, wingR, wingL, baseY: 0.7 + rng() * 0.6, flap: 42,
+      cx, cz, r: 1 + rng() * 1.8, sp: 0.8 + rng() * 0.6, phase: rng() * 9,
+    });
+  }
+  volcano(x, z, s = 1) {
+    // a smoking giant on the horizon — fog-proof so it looms through the haze
+    const H = 85 * s;
+    const bodyGeo = new THREE.CylinderGeometry(13 * s, 58 * s, H, 22, 3);
+    gradientize(bodyGeo, '#5d6b4e', '#4a3a33'); // jungly skirts, scorched summit
+    const bodyMat = toonVertexMat();
+    bodyMat.fog = false;
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.set(x, H / 2 - 4 * s, z);
+    body.castShadow = false;
+    body.receiveShadow = false;
+    this.scene.add(body);
+    const rim = new THREE.Mesh(
+      new THREE.CylinderGeometry(13.6 * s, 14.4 * s, 2.4 * s, 22, 1, true),
+      new THREE.MeshBasicMaterial({ color: '#ff6a2a', toneMapped: false, fog: false, side: THREE.DoubleSide })
+    );
+    rim.position.set(x, H - 4.6 * s, z);
+    this.scene.add(rim);
+    const lava = new THREE.Mesh(
+      new THREE.CircleGeometry(13.2 * s, 22),
+      new THREE.MeshBasicMaterial({ color: '#ffb13d', toneMapped: false, fog: false })
+    );
+    lava.rotation.x = -Math.PI / 2;
+    lava.position.set(x, H - 3.5 * s, z);
+    this.scene.add(lava);
+    for (let i = 0; i < 4; i++) { // lazy smoke puffs drifting up from the crater
+      const puff = new THREE.Mesh(
+        new THREE.SphereGeometry(6 * s, 9, 7),
+        new THREE.MeshBasicMaterial({ color: '#8f8a84', transparent: true, opacity: 0.55, fog: false, toneMapped: false })
+      );
+      this.scene.add(puff);
+      this.animated.push({
+        kind: 'smoke', obj: puff, x, z, baseY: H - 2 * s, rise: 36 * s,
+        speed: 0.035 + rng() * 0.02, offset: i / 4, drift: (rng() - 0.5) * 10 * s,
+      });
+    }
   }
   fence(height, color) {
     const size = this.bounds, t = 0.35;
@@ -567,11 +685,16 @@ class Builder {
           if (a.obj.position.x > a.limit) a.obj.position.x = -a.limit;
         } else if (a.kind === 'butterfly') {
           const s = t * a.sp + a.phase;
-          a.obj.position.set(a.cx + Math.cos(s) * a.r, 1.1 + Math.sin(t * 1.7 + a.phase) * 0.4, a.cz + Math.sin(s * 1.33) * a.r);
-          const flap = 0.5 + Math.sin(t * 14 + a.phase) * 0.55;
+          a.obj.position.set(a.cx + Math.cos(s) * a.r, (a.baseY ?? 1.1) + Math.sin(t * 1.7 + a.phase) * 0.4, a.cz + Math.sin(s * 1.33) * a.r);
+          const flap = 0.5 + Math.sin(t * (a.flap ?? 14) + a.phase) * 0.55;
           a.wingR.rotation.y = -flap;
           a.wingL.rotation.y = flap;
           a.obj.rotation.z = Math.cos(s) * 0.3;
+        } else if (a.kind === 'smoke') {
+          const ph = (t * a.speed + a.offset) % 1;
+          a.obj.position.set(a.x + a.drift * ph, a.baseY + ph * a.rise, a.z);
+          a.obj.scale.setScalar(0.5 + ph * 1.6);
+          a.obj.material.opacity = 0.55 * (1 - ph * ph);
         }
       }
     };
@@ -625,19 +748,27 @@ function buildJungle(scene) {
   b.lights({ sunColor: '#ffedb8', sunI: 2.4, sky: '#e8f3d0', ground: '#41603f', ambI: 1.35 });
   b.ground('#5f8a4a', '#3a5c34');
   b.fence(3, '#4a6b3a');
-  scene.fog = new THREE.Fog('#c2d8a8', bounds * 0.45, bounds * 2.3); // thicker jungle haze
+  scene.fog = new THREE.Fog('#c2d8a8', 40, 175); // deep, close jungle haze
   // giant trees with flared roots and huge canopies
   const giants = [[-20, -16, 1.1], [16, -24, 1.3], [28, 12, 1], [-8, 22, 1.2], [-34, 6, 1], [8, 40, 1.1], [-28, -38, 1.2], [40, -10, 1.1], [-44, 28, 1], [22, -46, 1], [44, 34, 1.2], [-14, -2, 0.9]];
   giants.forEach(([x, z, s]) => b.bigTree(x, z, s));
   b.bigTree(-48, -12, 1); b.bigTree(50, 18, 1.1); b.bigTree(-6, -50, 1.2); b.bigTree(34, 48, 1);
-  b.sprinkle(60, (x, z) => b.tree(x, z, 0.9 + rng() * 0.5, '#4a7040', '#8fb85f'), 12);
+  b.sprinkle(85, (x, z) => b.tree(x, z, 0.9 + rng() * 0.5, '#4a7040', '#8fb85f'), 12);
+  // palms poking through the understorey
+  for (let i = 0; i < 18; i++) {
+    const a = rng() * Math.PI * 2, r = 10 + rng() * (bounds - 14);
+    b.palm(Math.cos(a) * r, Math.sin(a) * r, 0.9 + rng() * 0.6);
+  }
+  // dense, dark undergrowth
+  b.sprinkle(55, (x, z) => b.bush(x, z, 0.9 + rng() * 0.7, '#324d2a', '#4f7a3c'), 8);
   // caves to hide inside!
   b.cave(-30, -26, 1.4);
   b.cave(26, 28, 1.5);
   b.cave(38, -34, 1.3);
   b.cave(-44, 36, 1.4);
-  // ferns, fallen logs, mossy rocks, mushrooms
-  b.sprinkle(400, (x, z) => b.tuft(x, z, 1.7, '#3f6b35', '#87b45f'));
+  // ferns, big drooping leaves, fallen logs, mossy rocks, mushrooms
+  b.sprinkle(650, (x, z) => b.tuft(x, z, 1.7, '#3f6b35', '#87b45f'));
+  b.sprinkle(130, (x, z) => b.tuft(x, z, 2.1 + rng(), '#2f5229', '#6fa14e')); // broad-leaf clumps
   for (const [x, z, rot] of [[-6, -20, 0.5], [18, 4, 1.4], [-22, 18, 2.0], [34, 22, 0.8], [-38, -12, 1.7], [4, -38, 0.3]]) {
     const log = new THREE.Mesh(new THREE.CylinderGeometry(0.65, 0.7, 5.5, 9), toonMatC('#5f4426'));
     log.rotation.z = Math.PI / 2;
@@ -652,7 +783,7 @@ function buildJungle(scene) {
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s });
   }
-  b.sprinkle(18, (x, z) => {
+  b.sprinkle(30, (x, z) => {
     const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, 0.3), toonMatC('#e8dcc0'));
     stem.position.set(x, 0.15, z);
     b.place(stem, { solid: false, cast: false });
@@ -661,9 +792,11 @@ function buildJungle(scene) {
     cap.position.set(x, 0.34, z);
     b.place(cap, { solid: false });
   });
-  b.sprinkle(70, (x, z) => b.flower(x, z, FLOWER_COLORS[Math.floor(rng() * 4)]));
+  // tropical blooms everywhere
+  const TROPICAL = ['#f2543d', '#ff8c42', '#ffd166', '#f2b6c9', '#c9a3e0'];
+  b.sprinkle(180, (x, z) => b.flower(x, z, TROPICAL[Math.floor(rng() * TROPICAL.length)]));
   // --- outskirts: the deep jungle ---
-  for (let i = 0; i < 22; i++) {
+  for (let i = 0; i < 30; i++) {
     const a = rng() * Math.PI * 2, r = 60 + rng() * 58;
     b.bigTree(Math.cos(a) * r, Math.sin(a) * r, 0.9 + rng() * 0.5);
   }
@@ -686,9 +819,20 @@ function buildJungle(scene) {
     b.place(rock);
     b.colliders.push({ minX: x - s, maxX: x + s, minZ: z - s, maxZ: z + s, top: 1.5 * s, base: 0 });
   }
-  b.hill(bounds + 22, 0, 34, '#54774a'); b.hill(-bounds - 20, -20, 30, '#4c6f44'); b.hill(6, bounds + 24, 32, '#5b7f50');
+  // the volcano looming beyond the east wall, smoking away
+  b.volcano(bounds + 95, -bounds * 0.35, 1.5);
+  b.hill(bounds + 22, 60, 34, '#54774a'); b.hill(-bounds - 20, -20, 30, '#4c6f44'); b.hill(6, bounds + 24, 32, '#5b7f50');
   b.cloud(-30, 56, 20, 1.2); b.cloud(35, 62, -30, 1.4); b.cloud(0, 58, 55, 1);
-  b.butterfly(-10, 6, '#eab54e'); b.butterfly(14, -12); b.butterfly(-24, 26, '#f2f0e4'); b.butterfly(30, 34, '#c9a3e0'); b.butterfly(0, -34, '#f2b6c9'); b.butterfly(-38, -18, '#eab54e');
+  // clouds of big curved-wing butterflies, plus busy little bees near the blooms
+  const BFLY = ['#f2b6c9', '#eab54e', '#8fd4f2', '#c9a3e0', '#ff8c42', '#f2f0e4', '#7fd49a', '#f2543d'];
+  for (let i = 0; i < 16; i++) {
+    const a = rng() * Math.PI * 2, r = 8 + rng() * bounds * 0.8;
+    b.butterfly(Math.cos(a) * r, Math.sin(a) * r, BFLY[i % BFLY.length], 0.9 + rng() * 0.9);
+  }
+  for (let i = 0; i < 10; i++) {
+    const a = rng() * Math.PI * 2, r = 8 + rng() * bounds * 0.7;
+    b.bug(Math.cos(a) * r, Math.sin(a) * r);
+  }
   const spawns = [
     [0, 0, -60], [0, 0, 60], [-52, 0, 16], [52, 0, -12], [-24, 0, -60], [28, 0, 60],
     [-72, 0, -16], [72, 0, 12], [-40, 0, 68], [40, 0, -64], [-80, 0, 40], [88, 0, -44],
